@@ -1,0 +1,11 @@
+# Ultralytics dataset config for the equipment detector (module 4).
+# Class names must match ITEMS in jetson/lab_assistant/voice/commands.py.
+path: data/lab_equipment   # relative to the repo root (train.py resolves it)
+train: images/train
+val: images/val
+
+names:
+  0: multimeter
+  1: screwdriver
+  2: wire
+  3: sensor

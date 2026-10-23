@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+models/
+.pio/
+.venv-pio/
+parking-*.csv
+
+# B: lab assistant (datasets, training runs, YOLO weights, printed markers)
+data/
+runs/
+*.pt
+*.engine
+markers/
+.pytest_cache/
+
+# A: local dashboard environment and retained telemetry
+.venv-dashboard/
+.local-data/

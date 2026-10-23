@@ -1,0 +1,47 @@
+# Static lab map. PLACEHOLDER NUMBERS: measure the real lab and update.
+#
+# Map frame: origin = robot centred on the dock coil, +x = the way the robot faces when
+# docked (towards the dock wall), +y = left. Headings in degrees, counter-clockwise.
+# The pose is reset to the dock pose every time the robot docks.
+
+stations:
+  dock:
+    pose: [0, 0, 0]
+    marker_id: 0
+    wall_mm: 120            # front reading when centred on the coil
+  storage:
+    pose: [-1500, 900, 90]
+    marker_id: 1
+    wall_mm: 150
+    search_offsets_mm: [0, 200, -200]   # strafe positions along the shelf for S4
+  workstation:
+    pose: [-1800, -600, 180]
+    marker_id: 2
+    wall_mm: 200
+
+# A route is a list of legs. Each leg: turn to `heading`, then drive `distance_mm`.
+#   stop_at_front_mm  end the leg with the front ultrasonic instead (final approach to a wall)
+#   expect            wall distances (front / left / right) at the end of the leg, used to
+#                     correct the position; off by more than safety.wall_tolerance_mm -> lost
+# Routes out of the dock start after S1 has reversed `motion.undock_mm` off the coil.
+# Routes into the dock stop ~300 mm out so the camera can still see the dock marker (S8).
+routes:
+  dock->storage:
+    - {heading: 180, distance_mm: 1350, expect: {right: 400}}
+    - {heading: 90, distance_mm: 900, stop_at_front_mm: 150}
+
+  storage->workstation:
+    - {heading: -90, distance_mm: 1500}
+    - {heading: 180, distance_mm: 300, stop_at_front_mm: 200}
+
+  workstation->storage:
+    - {heading: 0, distance_mm: 300}
+    - {heading: 90, distance_mm: 1500, stop_at_front_mm: 150}
+
+  storage->dock:
+    - {heading: -90, distance_mm: 900}
+    - {heading: 0, distance_mm: 1500, stop_at_front_mm: 300}
+
+  workstation->dock:
+    - {heading: 90, distance_mm: 600}
+    - {heading: 0, distance_mm: 1800, stop_at_front_mm: 300}

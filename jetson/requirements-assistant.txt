@@ -1,0 +1,12 @@
+# Self-proposed application (python -m lab_assistant.main). Needs Python >= 3.8,
+# because of ultralytics: on JetPack 4 run it inside the
+# ultralytics/ultralytics:latest-jetson-jetpack4 container.
+# The required core is Mega-only; these dependencies are for the proposed app.
+pyserial==3.5
+vosk==0.3.45
+sounddevice==0.4.6
+pyyaml
+numpy
+ultralytics
+pytest
+# system packages: espeak-ng, libportaudio2

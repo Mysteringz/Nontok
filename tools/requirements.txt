@@ -1,0 +1,2 @@
+# Optional desktop telemetry recorder. Not installed on the Jetson or Mega.
+pyserial==3.5

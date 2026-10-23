@@ -1,0 +1,83 @@
+# Robot-wide settings. Units: mm, mm/s, deg, deg/s, s.
+# Values marked TODO must be measured on the real robot.
+
+loop_hz: 10
+
+serial:
+  port: /dev/ttyACM0       # Arduino Mega over USB (check: ls /dev/ttyACM* /dev/ttyUSB*)
+  baud: 115200
+
+camera:
+  device: 0
+  width: 640
+  height: 480
+
+tilt:                      # module 2: servo angles, TODO tune
+  scan_deg: 90             # camera level: shelf
+  marker_deg: 95           # dock marker
+  tray_deg: 35             # looking down at the tray
+
+detector:                  # module 4
+  weights: models/lab_equipment.engine   # TensorRT engine on the Jetson; a .pt also works (slower)
+  conf: 0.5
+  imgsz: 416
+
+markers:
+  dictionary: DICT_4X4_50
+
+tray:
+  roi: [0.15, 0.35, 0.85, 1.0]   # tray area in the image as fractions [x1, y1, x2, y2], TODO
+  min_conf: 0.4
+
+voice:
+  model_dir: models/vosk-model-small-en-us-0.15
+  sample_rate: 16000       # use a rate the USB mic supports (python -m sounddevice)
+  device: null             # null = default input device
+
+speaker:
+  command: [espeak-ng, -s, "150"]   # add [-d, plughw:1,0]-style options for aplay if needed
+
+motion:
+  cruise_speed: 150
+  approach_speed: 80
+  strafe_speed: 120
+  speed_scale: 1.0         # actual / commanded speed, TODO: tools/calibrate_motion.py
+  slow_zone_mm: 250
+  undock_mm: 150           # reverse this far off the coil (S1)
+  turn_timeout_s: 8
+
+safety:                    # module 1
+  obstacle_stop_mm: 200    # T9
+  obstacle_clear_mm: 350   # T10
+  obstacle_margin_mm: 150  # on a final approach, only things this much closer than the wall are obstacles
+  avoid_extra_mm: 120      # keep strafing after the front clears, so the robot's corner clears too
+  side_min_mm: 100         # no room to strafe -> stuck
+  max_strafe_mm: 450       # T16
+  stuck_timeout_s: 15      # T16
+  wall_tolerance_mm: 200   # T15
+  min_correction_mm: 30
+  final_approach_overrun_mm: 400
+  check_settle_s: 0.3
+  telemetry_timeout_s: 1.0
+
+search:                    # S4
+  tilts_deg: [90, 75]
+  settle_s: 0.5
+  frames_per_view: 3
+
+load:                      # S5 / S7 tray checks
+  check_period_s: 0.5
+  confirm_checks: 3
+  timeout_s: 120
+
+docking:                   # module 3, S8
+  charge_mv_min: 4000      # receiver output meaning "on the coil", TODO measure
+  confirm_s: 1.0
+  marker_center_offset: 0.0  # marker x (-1..1) when the coil is centred (camera may be off-centre), TODO
+  center_tolerance: 0.05
+  center_gain: 300         # mm/s of strafe per unit of marker offset
+  marker_timeout_s: 3
+  creep_speed: 50
+  forward_timeout_s: 10
+  sweep_step_mm: 30
+  sweep_steps: 4
