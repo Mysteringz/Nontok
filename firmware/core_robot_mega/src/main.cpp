@@ -306,14 +306,13 @@ static void command(CommandPort& port, uint8_t id) {
   } else {
     if (!strcmp(op,"FWD")||!strcmp(op,"A")) x=manualSpeed;
     else if (!strcmp(op,"BACK")||!strcmp(op,"E")) x=-manualSpeed;
-    else if (!strcmp(op,"LEFT")||!strcmp(op,"G")) y=manualSpeed;
-    else if (!strcmp(op,"RIGHT")||!strcmp(op,"C")) y=-manualSpeed;
-    else if (!strcmp(op,"CW")) z=-25;
-    else if (!strcmp(op,"CCW")) z=25;
-    else if (!strcmp(op,"B")) { x=manualSpeed*0.7071f; y=-x; }
-    else if (!strcmp(op,"D")) { x=-manualSpeed*0.7071f; y=x; }
-    else if (!strcmp(op,"F")) { y=manualSpeed*0.7071f; x=-y; }
-    else if (!strcmp(op,"H")) { x=manualSpeed*0.7071f; y=x; }
+    else if (!strcmp(op,"LEFT")||!strcmp(op,"H")) y=manualSpeed;
+    else if (!strcmp(op,"RIGHT")||!strcmp(op,"B")) y=-manualSpeed;
+    else if (!strcmp(op,"CW")||!strcmp(op,"G")) z=-25;
+    else if (!strcmp(op,"CCW")||!strcmp(op,"C")) z=25;
+    // Match the actual working sketch's D/F wheel patterns, not its log labels.
+    else if (!strcmp(op,"D")) { x=manualSpeed*0.7071f; y=x; }
+    else if (!strcmp(op,"F")) { x=manualSpeed*0.7071f; y=-x; }
     else { bad(port); return; }
     if (!duration(strtok(NULL," \t"),ms)||strtok(NULL," \t")) { bad(port); return; }
   }
@@ -327,6 +326,12 @@ static void readPort(CommandPort& port, uint8_t id) {
       robot.stop();survey.end();surveyOwner=255; owner=255; port.used=0; port.dropping=true; reply(port,"OK STOP");if(hadSurvey) dumpSurvey(port);continue;
     }
     if (c=='\r') continue;
+    // Supplied App Inventor blocks contain a literal backslash+n suffix.
+    // Accept it only after one known button letter, retaining normal command bounds.
+    if (!port.dropping && c=='n' && port.used==2 && port.line[1]=='\\' &&
+        strchr("ABCDEFGHZ",port.line[0])) {
+      port.line[1]=0;port.used=0;command(port,id);return;
+    }
     if (c=='\n') {
       if (!port.dropping) { port.line[port.used]=0; command(port,id); }
       port.used=0; port.dropping=false;

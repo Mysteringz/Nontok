@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Probe Live View</title>
+<style>
+:root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --mute:#667085; --line:#e4e7ec; --bad:#c0362c; --ok:#1f7a4d;
+  --c0:#2a6fdb; --c1:#d9480f; --c2:#2b8a3e; --c3:#9c36b5; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#111418; --card:#1a1e24; --ink:#e7eaee;
+  --mute:#98a2b3; --line:#2b313a; --bad:#ff6b5e; --ok:#4cc38a; --c0:#6ea8ff; --c1:#ff922b; --c2:#69db7c; --c3:#da77f2; } }
+:root[data-theme="dark"] { --bg:#111418; --card:#1a1e24; --ink:#e7eaee; --mute:#98a2b3; --line:#2b313a; --bad:#ff6b5e;
+  --ok:#4cc38a; --c0:#6ea8ff; --c1:#ff922b; --c2:#69db7c; --c3:#da77f2; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.4 -apple-system,system-ui,sans-serif; }
+header { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); }
+h1 { font-size:16px; margin:0; }
+.badge { font-size:12px; padding:2px 8px; border-radius:99px; border:1px solid var(--line); color:var(--mute); }
+.badge.ok { color:var(--ok); border-color:var(--ok); } .badge.bad { color:var(--bad); border-color:var(--bad); }
+.buttons { display:flex; flex-wrap:wrap; gap:6px; margin-left:auto; }
+button { font:inherit; padding:5px 10px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer; }
+button:hover { border-color:var(--mute); }
+main { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr)); gap:12px; padding:12px 16px; }
+section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; min-width:0; }
+h2 { font-size:13px; margin:0 0 8px; color:var(--mute); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+.vals { display:flex; flex-wrap:wrap; gap:6px 16px; margin-bottom:8px; }
+.val b { font-size:20px; font-variant-numeric:tabular-nums; display:block; }
+.val span { font-size:12px; color:var(--mute); }
+.val i { display:inline-block; width:10px; height:3px; margin-right:4px; vertical-align:middle; }
+canvas { width:100%; height:140px; display:block; }
+pre { margin:0; font:12px/1.4 ui-monospace,monospace; white-space:pre-wrap; word-break:break-all; max-height:220px; overflow:auto; color:var(--mute); }
+.wide { grid-column:1/-1; }
+.view { position:relative; height:min(62vh,560px); overflow:hidden; border-radius:8px;
+  background:radial-gradient(ellipse at 50% 60%, var(--card) 0%, var(--bg) 75%); }
+#car { width:100%; height:100%; transform:perspective(1100px) rotateX(24deg) scale(1.06); transform-origin:50% 60%; }
+.hud { position:absolute; top:10px; left:12px; right:12px; display:flex; flex-wrap:wrap; gap:6px 22px; pointer-events:none; }
+.hud .val b { font-size:24px; }
+.hud-r { position:absolute; bottom:10px; right:12px; display:flex; gap:6px; }
+.legend { position:absolute; bottom:12px; left:12px; font-size:12px; color:var(--mute); }
+#swatch { width:56px; height:56px; border-radius:10px; border:1px solid var(--line); background:var(--bg); }
+[hidden] { display:none !important; }
+.motors { display:grid; grid-template-columns:minmax(240px,340px) 1fr; gap:16px; align-items:start; }
+@media (max-width:700px) { .motors { grid-template-columns:1fr; } }
+.motors svg { width:100%; max-width:340px; display:block; margin:auto; }
+.wheel { cursor:pointer; fill:var(--ink); opacity:.75; } .wheel:hover { opacity:1; }
+.wheel.picked { fill:var(--c1); opacity:1; }
+.step { margin:8px 0; } .step b { font-weight:600; }
+.row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:6px 0; }
+button:disabled { opacity:.4; cursor:not-allowed; }
+.warn { color:var(--bad); font-weight:600; }
+kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px ui-monospace,monospace; }
+.pad button { width:44px; height:38px; }
+.big-stop { background:var(--bad); color:#fff; border-color:var(--bad); font-weight:700; padding:8px 18px; }
+.note { font-size:12px; color:var(--mute); padding:0 16px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Hardware probe — live</h1>
+  <span class="row" style="margin:0">
+    <select id="port" style="font:inherit;padding:4px 6px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)"></select>
+    <button id="connect">Connect</button><button id="disconnect">Disconnect</button>
+  </span>
+  <span class="badge" id="link">connecting…</span>
+  <span class="badge" id="age">no data</span>
+  <span class="badge" title="Motors only run during SPIN or while WASD keys are held; the robot stops itself 0.4 s after the last drive command">motors: hold-to-drive, auto-stop</span>
+  <form id="mark" class="buttons" style="margin-left:0">
+    <input id="mark-text" placeholder="Mark test, e.g. beacon left off" style="font:inherit;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink);min-width:220px">
+    <button>Mark</button>
+  </form>
+  <div class="buttons">
+    <button data-c="GYROZERO" title="Robot must be still for 2 s">Zero gyro</button>
+    <button data-c="HEADING0">Angles → 0</button>
+    <button data-c="GYROINIT">Re-detect gyro</button>
+    <button data-c="PROBE">I²C scan</button>
+    <button data-c="STOP">STOP</button>
+  </div>
+</header>
+<main>
+  <section class="wide"><h2>Car view (live yaw from gyro Z, ultrasonic beams at ±45°)</h2>
+    <div class="view"><canvas id="car"></canvas>
+      <div class="hud">
+        <div class="val"><b id="h-yaw">—</b><span>yaw (CCW +)</span></div>
+        <div class="val"><b id="h-rate">—</b><span>yaw rate °/s</span></div>
+        <div class="val"><b id="h-l">—</b><span>left 45°</span></div>
+        <div class="val"><b id="h-r">—</b><span>right 45°</span></div>
+        <div class="val"><b id="h-col">—</b><span>floor colour (confidence)</span></div>
+      </div>
+      <div class="legend">Grid rings every 0.5 m · scroll to zoom · car outline and sensor positions not yet measured</div>
+      <div class="hud-r"><button id="flip" style="pointer-events:auto">Yaw sign: −Z</button></div>
+    </div>
+  </section>
+  <section class="wide"><h2>Motors: identify wheels &amp; drive</h2>
+    <div class="motors">
+      <svg viewBox="-50 0 400 380" aria-label="Robot top view, front at top">
+        <polygon points="150,8 185,58 160,58 160,84 140,84 140,58 115,58" fill="var(--c0)"/>
+        <text x="150" y="102" text-anchor="middle" fill="var(--c0)" font-size="14" font-weight="700">FRONT</text>
+        <rect x="80" y="115" width="140" height="230" rx="22" fill="var(--c0)" opacity=".25" stroke="var(--c0)"/>
+        <g id="wheels"></g>
+        <text x="150" y="235" text-anchor="middle" fill="var(--mute)" font-size="12">top view</text>
+      </svg>
+      <div>
+        <div class="row"><button class="big-stop" id="motor-stop" title="Also: Space">■ STOP MOTORS</button>
+          <span style="color:var(--mute)">Space also stops. Robot battery must be ON for motor tests: on USB power alone a motor can freeze the board.</span></div>
+        <label class="row"><input type="checkbox" id="lifted">
+          <span class="warn">Wheels are lifted off the ground (or the area around the robot is clear)</span></label>
+        <div class="step"><b>1. Identify.</b> Click a wheel on the diagram, choose its motor and direction.
+          Not sure which motor? Spin one (PWM 90, 0.8 s) and watch which wheel moves.</div>
+        <div class="row" id="spin-buttons"></div>
+        <div class="row" id="prompt" style="color:var(--mute)">Not started.</div>
+        <div id="assign" hidden>
+          <div class="row">Motor: <span id="assign-motors"></span></div>
+          <div class="row">On the last spin this wheel rolled:
+            <button id="dir-fwd">Forward ↑ (toward FRONT)</button><button id="dir-back">Backward ↓</button>
+            <button id="assign-clear">Clear this wheel</button></div>
+        </div>
+        <div class="row"><button id="map-reset">Reset mapping</button></div>
+        <pre id="map-out"></pre>
+        <div class="step"><b>2. Drive.</b> Hold keys: <kbd>W</kbd>/<kbd>S</kbd> forward/back, <kbd>A</kbd>/<kbd>D</kbd> turn left/right,
+          <kbd>Q</kbd>/<kbd>E</kbd> strafe left/right, <kbd>Space</kbd> stop.
+          Hold <kbd>Shift</kbd> for <b>linear mode</b>: <kbd>A</kbd>/<kbd>D</kbd> strafe instead of turning, so WASD moves straight front/side with no rotation
+          (W+D = diagonal). Releasing every key stops; the robot also stops itself 0.4 s after the last command.</div>
+        <div class="row"><label><input type="checkbox" id="drive-on" disabled> Enable keyboard drive</label>
+          <label>Speed <input type="range" id="speed" min="40" max="200" value="100"> <span id="speed-v">100</span>/255</label></div>
+        <div class="row pad">
+          <button data-k="q">Q</button><button data-k="w">W</button><button data-k="e">E</button>
+          <button data-k="a">A</button><button data-k="s">S</button><button data-k="d">D</button>
+          <button id="linear" title="Same as holding Shift" style="width:auto">⇧ Linear: off</button>
+          <span id="drive-state" style="color:var(--mute);margin-left:8px">drive off</span></div>
+      </div>
+    </div>
+  </section>
+  <section><h2>LDRs A0 · A7 · A2 · A6 (left → right, ADC: lower = brighter)</h2><div class="vals" id="v-light"></div><canvas id="g-light"></canvas></section>
+  <section><h2>Ultrasonic (mm, gaps = no echo)</h2><div class="vals" id="v-us"></div><canvas id="g-us"></canvas></section>
+  <section><h2>Gyro angle (°, integrated since zero)</h2><div class="vals" id="v-ang"></div><canvas id="g-ang"></canvas></section>
+  <section><h2>Gyro rate (°/s) &amp; accel</h2><div class="vals" id="v-rate"></div><canvas id="g-rate"></canvas></section>
+  <section><h2>Colour sensor (edges / 6.9 ms per filter, 20% scaling)</h2>
+    <div class="vals"><div id="swatch"></div><div class="val"><b id="col-name">—</b><span id="col-note">—</span></div>
+      <button id="ref-green" title="Green paper under the sensor, then click">Set green ref</button>
+      <button id="ref-red" title="Red paper under the sensor, then click">Set red ref</button></div>
+    <div class="vals" id="v-col"></div><canvas id="g-col"></canvas></section>
+  <section><h2>Events</h2><pre id="events"></pre></section>
+</main>
+<p class="note" id="log"></p>
+<script>
+const WINDOW_MS = 60000, $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const series = {};  // chart id -> array of {t, v:[...]}
+const charts = {
+  light: { names:['L1 A0','L2 A7','L3 A2','L4 A6'], get:s => s.adc, min:0, max:1023 },
+  us: { names:['left','right'], get:s => s.ultrasonic_mm.map(v => v > 0 ? v : null), min:0 },
+  ang: { names:['X','Y','Z (yaw)'], get:s => s.gyro && s.gyro.angle_deg || [null,null,null] },
+  rate: { names:['X','Y','Z'], get:s => s.gyro && s.gyro.rate_dps || [null,null,null] },
+  col: { names:['red','green','blue','clear'], get:s => s.color_rgbc || [null,null,null,null], min:0 },
+};
+function fmt(v, d = 0) { return v == null ? '—' : Number(v).toFixed(d); }
+function draw(id) {
+  const c = $('g-' + id), spec = charts[id], data = series[id] || [], dpr = devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight; c.width = w * dpr; c.height = h * dpr;
+  const x = c.getContext('2d'); x.scale(dpr, dpr); x.clearRect(0, 0, w, h);
+  const now = Date.now(), vals = data.flatMap(p => p.v).filter(v => v != null);
+  let lo = spec.min ?? Math.min(...vals, 0), hi = spec.max ?? Math.max(...vals, 1);
+  if (spec.max == null) { const pad = (hi - lo) * 0.1 || 1; hi += pad; if (spec.min == null) lo -= pad; }
+  x.strokeStyle = css('--line'); x.fillStyle = css('--mute'); x.font = '11px system-ui'; x.lineWidth = 1;
+  for (const f of [0, .5, 1]) { const y = 4 + (h - 8) * (1 - f); x.beginPath(); x.moveTo(36, y); x.lineTo(w, y); x.stroke();
+    x.fillText(fmt(lo + (hi - lo) * f, Math.abs(hi - lo) < 10 ? 1 : 0), 0, y + 4); }
+  spec.names.forEach((_, k) => {
+    x.strokeStyle = css('--c' + k); x.lineWidth = 1.6; x.beginPath(); let pen = false;
+    for (const p of data) {
+      const v = p.v[k]; if (v == null) { pen = false; continue; }
+      const px = 36 + (w - 36) * (1 - (now - p.t) / WINDOW_MS), py = 4 + (h - 8) * (1 - (v - lo) / (hi - lo || 1));
+      pen ? x.lineTo(px, py) : x.moveTo(px, py); pen = true;
+    }
+    x.stroke();
+  });
+}
+function values(id, v, extra = '') {
+  $('v-' + id).innerHTML = charts[id].names.map((n, k) =>
+    `<div class="val"><b>${fmt(v[k], id === 'ang' || id === 'rate' ? 2 : 0)}</b><span><i style="background:var(--c${k})"></i>${n}</span></div>`).join('') + extra;
+}
+function sample(s) {
+  const t = Date.now();
+  for (const id in charts) {
+    const v = charts[id].get(s); (series[id] ||= []).push({ t, v });
+    while (series[id].length && t - series[id][0].t > WINDOW_MS) series[id].shift();
+  }
+  const g = s.gyro || {};
+  values('light', s.adc); values('us', s.ultrasonic_mm.map(v => v > 0 ? v : null));
+  values('ang', g.angle_deg || [], `<div class="val"><b>${g.angles_valid ? 'valid' : 'INVALID'}</b><span>${g.model || 'no gyro'}</span></div>`);
+  values('rate', g.rate_dps || [], `<div class="val"><b>${(g.accel_raw || []).join(' / ') || '—'}</b><span>accel raw X/Y/Z</span></div>` +
+    `<div class="val"><b>${g.int_rises ?? '—'}</b><span>INT rises</span></div><div class="val"><b>${g.bus_errors ?? '—'}</b><span>bus errors</span></div>`);
+  values('col', s.color_rgbc || []); showColour(s.color_rgbc);
+}
+function event(r) {
+  const pre = $('events'), { seq, received_at, ...rest } = r;
+  pre.textContent = `${received_at.slice(11, 19)} ${JSON.stringify(rest)}\n` + pre.textContent.slice(0, 8000);
+}
+// ---- Colour: red vs green only (display; the Mega makes the real decision) --
+// R/G ratio references measured 23 Oct: green 0.83 (0.78-0.90), red 1.66 (1.59-1.72).
+let refs = { green: 0.83, red: 1.66 }, colour = null;
+try { refs = JSON.parse(localStorage.getItem('rgRefs')) || refs; } catch {}
+function classify(rgbc) {
+  if (!rgbc || !rgbc[0] || !rgbc[1]) return null;
+  const ratio = rgbc[0] / rgbc[1], split = Math.sqrt(refs.green * refs.red);  // geometric midpoint
+  const red = ratio > split, half = Math.log(refs.red / refs.green) / 2;
+  const confidence = Math.min(1, Math.abs(Math.log(ratio / split)) / half);
+  return { name: red ? 'RED' : 'GREEN', ratio, confidence, rgb: red ? [220, 50, 40] : [40, 180, 70] };
+}
+function showColour(rgbc) {
+  colour = classify(rgbc);
+  $('swatch').style.background = colour ? `rgb(${colour.rgb})` : 'var(--bg)';
+  $('swatch').style.opacity = colour ? 0.35 + 0.65 * colour.confidence : 1;
+  $('col-name').textContent = colour ? `${colour.name} ${Math.round(100 * colour.confidence)}%` : '—';
+  $('col-note').textContent = colour ? `R/G ${colour.ratio.toFixed(2)} · green ${refs.green.toFixed(2)} | red ${refs.red.toFixed(2)}` : 'no colour frame';
+}
+function setRef(name) {
+  const r = latest && latest.color_rgbc; if (!r || !r[1]) return;
+  refs[name] = r[0] / r[1];
+  try { localStorage.setItem('rgRefs', JSON.stringify(refs)); } catch {}
+  showColour(r);
+}
+$('ref-green').onclick = () => setRef('green');
+$('ref-red').onclick = () => setRef('red');
+
+// ---- Car view ----------------------------------------------------------
+const CAR = { w:230, l:300 };                 // mm, nominal until measured
+const SENSORS = [{ x:-95, y:150, a:45 }, { x:95, y:150, a:-45 }];  // left, right; a = deg CCW from forward
+const BEAM_HALF = 15, NO_ECHO_MM = 4000;
+let VIEW_MM = 1200;  // scroll on the view to zoom 0.5-4 m
+let latest = null, shownYaw = 0, yawSign = -1;  // chip Z points down: expect yaw = -Z (unconfirmed)
+try { yawSign = Number(localStorage.getItem('yawSign')) || -1; } catch {}
+const flipBtn = $('flip');
+const showSign = () => flipBtn.textContent = 'Yaw sign: ' + (yawSign < 0 ? '−Z' : '+Z');
+showSign();
+flipBtn.onclick = () => { yawSign = -yawSign; showSign(); try { localStorage.setItem('yawSign', yawSign); } catch {} };
+function rangeColour(mm) { return mm < 150 ? css('--bad') : mm < 400 ? css('--c1') : css('--c0'); }
+function yawNow() { const z = latest && latest.gyro && latest.gyro.angle_deg; return z ? yawSign * z[2] : 0; }
+function drawCar() {
+  const c = $('car'), dpr = devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== w * dpr || c.height !== h * dpr) { c.width = w * dpr; c.height = h * dpr; }
+  const x = c.getContext('2d'); x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h * 0.62, k = Math.min(w / 2, h * 0.62) / VIEW_MM;  // px per mm
+  // Fixed world grid; heading 0 (where the gyro was zeroed) points up.
+  x.strokeStyle = css('--line'); x.fillStyle = css('--mute'); x.font = '11px system-ui'; x.lineWidth = 1;
+  for (let r = 500; r <= VIEW_MM + 1000; r += 500) {
+    x.beginPath(); x.arc(cx, cy, r * k, 0, 2 * Math.PI); x.stroke();
+    if (r <= VIEW_MM) x.fillText((r / 1000).toFixed(1) + ' m', cx + 4, cy - r * k - 3);
+  }
+  x.beginPath(); x.moveTo(cx, cy - VIEW_MM * k * 1.3); x.lineTo(cx, cy + VIEW_MM * k); x.moveTo(cx - w, cy); x.lineTo(cx + w, cy); x.stroke();
+  x.fillText('0° (zero heading)', cx + 4, 14);
+  // Smoothly follow the measured yaw along the shortest way round.
+  const target = yawNow(); shownYaw += ((target - shownYaw + 540) % 360 - 180) * 0.25;
+  x.save(); x.translate(cx, cy); x.rotate(-shownYaw * Math.PI / 180); x.scale(k, -k);  // y up, CCW positive
+  const us = latest ? latest.ultrasonic_mm : [-1, -1];
+  SENSORS.forEach((s, i) => {
+    const mm = us[i], ok = mm > 0, len = ok ? mm : Math.min(NO_ECHO_MM, VIEW_MM * 1.4);
+    const a0 = (90 + s.a - BEAM_HALF) * Math.PI / 180, a1 = (90 + s.a + BEAM_HALF) * Math.PI / 180;
+    x.beginPath(); x.moveTo(s.x, s.y); x.arc(s.x, s.y, len, a0, a1); x.closePath();
+    if (ok) {
+      const g = x.createRadialGradient(s.x, s.y, 0, s.x, s.y, len), col = rangeColour(mm);
+      g.addColorStop(0, col + '10'); g.addColorStop(1, col + '70'); x.fillStyle = g; x.fill();
+      x.beginPath(); x.arc(s.x, s.y, len, a0, a1); x.strokeStyle = col; x.lineWidth = 6 / k * 0.6; x.stroke();
+    } else {
+      x.setLineDash([40, 40]); x.strokeStyle = css('--mute'); x.lineWidth = 1.5 / k; x.stroke(); x.setLineDash([]);
+    }
+  });
+  // Body, wheels, windscreen-style nose.
+  x.fillStyle = css('--ink'); x.globalAlpha = 0.85;
+  for (const [wx, wy] of [[-1, 1], [1, 1], [-1, -1], [1, -1]]) x.fillRect(wx * (CAR.w / 2 + 6) - 18, wy * CAR.l * 0.3 - 40, 36, 80);
+  x.globalAlpha = 1; x.fillStyle = css('--c0');
+  x.beginPath(); x.roundRect(-CAR.w / 2, -CAR.l / 2, CAR.w, CAR.l, 40); x.fill();
+  x.fillStyle = css('--card'); x.globalAlpha = 0.35;
+  x.beginPath(); x.moveTo(-CAR.w * 0.32, CAR.l * 0.18); x.lineTo(CAR.w * 0.32, CAR.l * 0.18); x.lineTo(CAR.w * 0.24, CAR.l * 0.36); x.lineTo(-CAR.w * 0.24, CAR.l * 0.36); x.fill();
+  x.globalAlpha = 1;
+  // LDRs (A0, A7, A2, A6) along the front edge, left to right, brightness = ADC.
+  const adc = latest ? latest.adc : [0, 0, 0, 0];
+  adc.forEach((v, i) => {
+    const px = -CAR.w * 0.36 + i * CAR.w * 0.24;
+    x.fillStyle = `rgba(255,200,40,${0.15 + 0.85 * (1023 - v) / 1023})`;  // lower ADC = brighter x.fillRect(px - 18, CAR.l / 2 - 26, 36, 22);
+    x.strokeStyle = css('--card'); x.lineWidth = 3; x.strokeRect(px - 18, CAR.l / 2 - 26, 36, 22);
+  });
+  // Colour sensor under the front: patch of the colour it currently sees.
+  x.beginPath(); x.arc(0, CAR.l * 0.05, 34, 0, 2 * Math.PI);
+  x.fillStyle = colour ? `rgb(${colour.rgb})` : css('--card'); x.fill();
+  x.strokeStyle = css('--card'); x.lineWidth = 6; x.stroke();
+  x.restore();
+  // Range labels at each beam's end, drawn upright.
+  x.font = '600 13px system-ui';
+  SENSORS.forEach((s, i) => {
+    const mm = us[i], ok = mm > 0, len = Math.min(ok ? mm : VIEW_MM * 1.1, VIEW_MM * 1.1) + 120;
+    const a = (90 + s.a + shownYaw) * Math.PI / 180, r = shownYaw * Math.PI / 180;
+    const sx = s.x * Math.cos(r) - s.y * Math.sin(r), sy = s.x * Math.sin(r) + s.y * Math.cos(r);
+    const px = cx + (sx + Math.cos(a) * len) * k, py = cy - (sy + Math.sin(a) * len) * k;
+    x.fillStyle = ok ? rangeColour(mm) : css('--mute'); x.textAlign = 'center';
+    x.fillText(ok ? mm + ' mm' : 'no echo', px, py); x.textAlign = 'start';
+  });
+  const g = latest && latest.gyro;
+  $('h-yaw').textContent = g && g.angle_deg ? fmt(target, 1) + '°' + (g.angles_valid ? '' : ' (invalid)') : '—';
+  $('h-rate').textContent = g && g.rate_dps ? fmt(yawSign * g.rate_dps[2], 1) : '—';
+  $('h-l').textContent = us[0] > 0 ? us[0] + ' mm' : 'no echo'; $('h-r').textContent = us[1] > 0 ? us[1] + ' mm' : 'no echo';
+  $('h-col').textContent = colour ? `${colour.name} ${Math.round(100 * colour.confidence)}%` : '—';
+  $('h-col').style.color = colour ? `rgb(${colour.rgb})` : '';
+  requestAnimationFrame(drawCar);
+}
+$('car').parentElement.addEventListener('wheel', e => { e.preventDefault();
+  VIEW_MM = Math.min(4000, Math.max(500, VIEW_MM * (e.deltaY > 0 ? 1.1 : 0.9))); }, { passive:false });
+requestAnimationFrame(drawCar);
+
+let after = 0, lastSample = 0;
+async function poll() {
+  try {
+    const r = await (await fetch('/api/lines?after=' + after)).json();
+    after = r.seq; $('link').textContent = r.status;
+    $('link').className = 'badge ' + (r.status.startsWith('connected') ? 'ok' : 'bad');
+    $('log').textContent = 'Logging every line to ' + r.log;
+    for (const line of r.lines) {
+      if (line.type === 'sample') {
+        // Uptime going backwards = the Mega rebooted (ready lines are not sent over Bluetooth).
+        if (latest && line.ms < latest.ms) {
+          const msg = `ROBOT REBOOTED at ${new Date().toLocaleTimeString()} (cause: ${line.boot || 'unknown'})`;
+          event({ seq: 0, received_at: new Date().toISOString(), note: msg }); mark(msg);
+          if ($('drive-on').checked) { $('drive-on').checked = false; stopDrive(true); }
+          prompt(msg + '. Drive disabled. brownout = battery/supply dip under motor load.');
+        }
+        sample(line); latest = line; lastSample = Date.now();
+      } else event(line);
+      if (line.type === 'ready' && $('drive-on').checked) {
+        $('drive-on').checked = false; stopDrive();
+        prompt(`Board RESET during drive (cause: ${line.reset_cause || 'unknown'}). Drive disabled. Check the battery is ON and charged.`);
+      }
+    }
+  } catch { $('link').textContent = 'dashboard server stopped'; $('link').className = 'badge bad'; }
+  const age = lastSample ? (Date.now() - lastSample) / 1000 : null;
+  if ($('drive-on').checked && (age == null || age > 1.5)) {
+    // No telemetry means commands may not be arriving either; the robot's own 0.4 s
+    // watchdog stops it, and the operator must not believe they are still driving.
+    $('drive-on').checked = false; stopDrive(true);
+    prompt('LINK LOST while driving: drive disabled (the robot stops itself 0.4 s after the last command). ' +
+           'On USB, motor noise can hang the USB chip: unplug/replug, or drive over Bluetooth with the cable out.');
+  }
+  $('age').textContent = age == null ? 'no data' : age < 2 ? 'live' : `stale ${age.toFixed(0)} s`;
+  $('age').className = 'badge ' + (age != null && age < 2 ? 'ok' : 'bad');
+  for (const id in charts) draw(id);
+  setTimeout(poll, 250);
+}
+document.querySelectorAll('button[data-c]').forEach(b => b.onclick = () =>
+  fetch('/api/command', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ command:b.dataset.c }) }));
+// ---- Motors: identify mapping, then mecanum keyboard drive ----------------
+const POS = { FL:{ x:52, y:150, name:'front-left' }, FR:{ x:220, y:150, name:'front-right' },
+              RL:{ x:52, y:262, name:'rear-left' }, RR:{ x:220, y:262, name:'rear-right' } };
+let motorMap = {}, spunMotor = null, pickedPos = null, spinDir = 1;  // spinDir: raw sign of the last spin
+try { motorMap = JSON.parse(localStorage.getItem('motorMap')) || {}; } catch {}
+const command = c => fetch('/api/command', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ command:c }) });
+const mark = text => fetch('/api/mark', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ text }) });
+const mapComplete = () => Object.keys(POS).every(p => motorMap[p]);
+function renderWheels() {
+  $('wheels').innerHTML = Object.entries(POS).map(([p, w]) => {
+    const m = motorMap[p], label = m ? `M${m.motor} ${m.sign > 0 ? '' : '(reversed)'}` : '?';
+    const left = p[1] === 'L', lx = left ? w.x - 8 : w.x + 36, anchor = left ? 'end' : 'start';
+    return `<rect class="wheel${pickedPos === p ? ' picked' : ''}" data-p="${p}" x="${w.x}" y="${w.y - 40}" width="28" height="80" rx="6"/>
+      <text x="${lx}" y="${w.y - 4}" text-anchor="${anchor}" font-size="13" font-weight="700" fill="var(--ink)">${label}</text>
+      <text x="${lx}" y="${w.y + 14}" text-anchor="${anchor}" font-size="11" fill="var(--mute)">${p}</text>`;
+  }).join('');
+  document.querySelectorAll('.wheel').forEach(r => r.onclick = () => pickWheel(r.dataset.p));
+  const rows = Object.entries(POS).map(([p, w]) => motorMap[p]
+    ? `${p} (${w.name}): M${motorMap[p].motor}, ${motorMap[p].sign > 0 ? 'normal' : 'reversed'} (forward = raw ${motorMap[p].sign > 0 ? '+' : '−'})` : `${p} (${w.name}): not identified`);
+  let cfg = '';
+  if (mapComplete()) {
+    const order = ['FL','FR','RL','RR'].map(p => motorMap[p]), pins = { pwm:[12,8,9,5], in1:['34','37','43','A4'], in2:['35','36','42','A5'] };
+    const same = order.every((m, i) => m.motor === i + 1) && order.map(m => m.sign).join() === '-1,1,-1,1';
+    cfg = `\nconfig.h (order FL, FR, RL, RR)${same ? ': matches the current config' : ': DIFFERS from the current config'}\n` +
+      `MOTOR_PWM  = {${order.map(m => pins.pwm[m.motor - 1]).join(', ')}}\n` +
+      `MOTOR_IN1  = {${order.map(m => pins.in1[m.motor - 1]).join(', ')}}\n` +
+      `MOTOR_IN2  = {${order.map(m => pins.in2[m.motor - 1]).join(', ')}}\n` +
+      `MOTOR_SIGN = {${order.map(m => m.sign).join(', ')}}`;
+  }
+  $('map-out').textContent = rows.join('\n') + cfg;
+  updateDriveControls();
+}
+function prompt(text) { $('prompt').textContent = text; }
+function renderAssign() {
+  $('assign').hidden = !pickedPos;
+  if (!pickedPos) return;
+  $('assign-motors').innerHTML = [1, 2, 3, 4].map(m => {
+    const owner = Object.keys(motorMap).find(p => motorMap[p].motor === m && p !== pickedPos);
+    return `<button data-am="${m}" style="${spunMotor === m ? 'border-color:var(--c1);color:var(--c1)' : ''}">M${m}${owner ? ` (now ${owner})` : ''}</button>`;
+  }).join(' ');
+  document.querySelectorAll('[data-am]').forEach(b => b.onclick = () => { spunMotor = Number(b.dataset.am); renderAssign();
+    prompt(`${POS[pickedPos].name} = M${spunMotor}. Now choose its direction.`); });
+}
+function pickWheel(p) {
+  pickedPos = p; renderWheels(); renderAssign();
+  const current = motorMap[p];
+  if (current && spunMotor == null) spunMotor = current.motor, renderAssign();
+  prompt(spunMotor == null ? `${POS[p].name}: choose its motor.` : `${POS[p].name} = M${spunMotor}. Choose its direction.`);
+}
+function setDirection(forward) {
+  if (!pickedPos) return prompt('Click a wheel first.');
+  if (spunMotor == null) return prompt('Choose the motor (M1–M4) first.');
+  for (const p in motorMap) if (motorMap[p].motor === spunMotor) delete motorMap[p];
+  // sign = raw output that rolls the wheel forward, relative to the raw direction just spun.
+  motorMap[pickedPos] = { motor: spunMotor, sign: forward ? spinDir : -spinDir };
+  try { localStorage.setItem('motorMap', JSON.stringify(motorMap)); } catch {}
+  mark(`motor map: ${pickedPos} = M${spunMotor}, forward = raw ${motorMap[pickedPos].sign > 0 ? '+' : '-'}`);
+  prompt(`Saved ${POS[pickedPos].name} = M${spunMotor}.` + (mapComplete() ? ' All four set.' : ' Click the next wheel.'));
+  spunMotor = pickedPos = null; renderWheels(); renderAssign();
+}
+$('assign-clear').onclick = () => { if (!pickedPos) return; delete motorMap[pickedPos];
+  try { localStorage.setItem('motorMap', JSON.stringify(motorMap)); } catch {}
+  prompt(`Cleared ${POS[pickedPos].name}.`); spunMotor = pickedPos = null; renderWheels(); renderAssign(); };
+$('spin-buttons').innerHTML = [1, 2, 3, 4].map(m => `<button data-m="${m}" disabled>Spin M${m}</button>`).join('') +
+  '<span style="color:var(--mute)">configured wheels spin forward</span>';
+document.querySelectorAll('#spin-buttons button').forEach(b => b.onclick = () => {
+  spunMotor = Number(b.dataset.m);
+  // A configured motor spins its wheel FORWARD; an unconfigured one spins raw "+".
+  const owner = Object.keys(motorMap).find(p => motorMap[p].motor === spunMotor);
+  spinDir = owner ? motorMap[owner].sign : 1;
+  command(`SPIN ${spunMotor} ${spinDir > 0 ? '+' : '-'}`); renderAssign();
+  prompt(owner ? `M${spunMotor} (${POS[owner].name}) should now roll FORWARD for 0.8 s. If it rolls backward, click it and choose "Backward".`
+               : `M${spunMotor} spinning raw "+" for 0.8 s… ` + (pickedPos ? 'choose its direction.' : 'click the wheel that moved.'));
+});
+$('motor-stop').onclick = () => { if ($('drive-on').checked) $('drive-on').checked = false; stopDrive(true); prompt('STOP sent.'); };
+$('dir-fwd').onclick = () => setDirection(true);
+$('dir-back').onclick = () => setDirection(false);
+$('map-reset').onclick = () => { motorMap = {}; try { localStorage.removeItem('motorMap'); } catch {} spunMotor = pickedPos = null; renderWheels(); renderAssign(); prompt('Mapping cleared.'); };
+
+// Drive link discipline: send on change, else a 200 ms keep-alive (firmware stops after
+// 400 ms of silence); at most one request in flight, newest command wins; no repeated STOPs.
+let shiftHeld = false, linearLatch = false;
+const linearMode = () => shiftHeld || linearLatch;
+const held = new Set(); let driveTimer = null, lastSent = '', lastSentAt = 0, inFlight = false, queued = null;
+function sendDrive(c) {
+  if (inFlight) { queued = c; return; }
+  inFlight = true; lastSent = c; lastSentAt = Date.now();
+  command(c).finally(() => { inFlight = false; if (queued) { const next = queued; queued = null; sendDrive(next); } });
+}
+const KEYS = 'wasdqe';
+function updateDriveControls() {
+  const lifted = $('lifted').checked;
+  document.querySelectorAll('#spin-buttons button').forEach(b => b.disabled = !lifted);
+  $('drive-on').disabled = !mapComplete();
+  if (!mapComplete() && $('drive-on').checked) { $('drive-on').checked = false; stopDrive(); }
+}
+function driveCommand() {
+  const k = c => held.has(c) ? 1 : 0, speed = Number($('speed').value);
+  // Normal: A/D turn. Linear (Shift): A/D strafe, no rotation. vy left +, w CCW +.
+  const side = k('a') - k('d'), linear = linearMode();
+  const vx = k('w') - k('s'), vy = Math.max(-1, Math.min(1, k('q') - k('e') + (linear ? side : 0))), w = linear ? 0 : side;
+  const wheel = { FL: vx - vy - w, FR: vx + vy + w, RL: vx + vy - w, RR: vx - vy + w };
+  const peak = Math.max(1, ...Object.values(wheel).map(Math.abs)), out = [0, 0, 0, 0];
+  for (const p in wheel) out[motorMap[p].motor - 1] = Math.round(motorMap[p].sign * speed * wheel[p] / peak);
+  return 'MOT ' + out.join(' ');
+}
+function stopDrive(force) {   // force: an explicit operator stop is always sent
+  held.clear(); clearInterval(driveTimer); driveTimer = null; queued = null;
+  if (force || lastSent !== 'STOP') { inFlight = false; sendDrive('STOP'); }
+  document.querySelectorAll('.pad button[data-k]').forEach(b => b.style.borderColor = ''); $('drive-state').textContent = $('drive-on').checked ? 'stopped' : 'drive off'; }
+function driveTick() {
+  if (!held.size) return stopDrive();
+  const c = driveCommand();
+  if (c !== lastSent || Date.now() - lastSentAt >= 200) sendDrive(c);
+  $('drive-state').textContent = c;
+}
+function press(key) {
+  if (!$('drive-on').checked || !mapComplete() || held.has(key)) return;
+  held.add(key); document.querySelector(`.pad [data-k="${key}"]`).style.borderColor = 'var(--c1)';
+  driveTick(); if (!driveTimer) driveTimer = setInterval(driveTick, 50);   // checks only; sends on change or keep-alive
+}
+function release(key) {
+  if (!held.delete(key)) return;
+  document.querySelector(`.pad [data-k="${key}"]`).style.borderColor = '';
+  if (!held.size) stopDrive();
+}
+function showLinear() { $('linear').textContent = '⇧ Linear: ' + (linearMode() ? 'ON' : 'off');
+  $('linear').style.borderColor = linearMode() ? 'var(--c1)' : ''; }
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.key === 'Shift') { shiftHeld = true; showLinear(); return; }
+  const key = e.key.toLowerCase();
+  if (key === ' ') { e.preventDefault(); stopDrive(true); return; }
+  if (KEYS.includes(key) && key.length === 1 && $('drive-on').checked) { e.preventDefault(); if (!e.repeat) press(key); }
+});
+addEventListener('keyup', e => {
+  if (e.key === 'Shift') { shiftHeld = false; showLinear(); return; }
+  release(e.key.toLowerCase());
+});
+$('linear').onclick = () => { linearLatch = !linearLatch; showLinear(); };
+addEventListener('blur', () => { shiftHeld = false; showLinear(); if ($('drive-on').checked) { $('drive-on').checked = false; stopDrive(); } });
+document.addEventListener('visibilitychange', () => { if (document.hidden && $('drive-on').checked) { $('drive-on').checked = false; stopDrive(); } });
+document.querySelectorAll('.pad button[data-k]').forEach(b => {
+  b.onpointerdown = e => { e.preventDefault(); if (e.repeat) return; press(b.dataset.k); };
+  b.onpointerup = b.onpointerleave = b.onpointercancel = () => release(b.dataset.k);
+});
+$('drive-on').onchange = () => { stopDrive(); if ($('drive-on').checked) mark('keyboard drive enabled'); };
+$('lifted').onchange = updateDriveControls;
+$('speed').oninput = () => $('speed-v').textContent = $('speed').value;
+renderWheels();
+
+// ---- Connection picker ------------------------------------------------------
+async function loadPorts() {
+  try {
+    const r = await (await fetch('/api/ports')).json(), sel = $('port'), keep = sel.value || r.selected;
+    const names = { usb:'USB cable', bluetooth:'Bluetooth', other:'other' };
+    sel.innerHTML = r.ports.map(p => `<option value="${p.device}">${names[p.kind]}: ${p.device.replace('/dev/cu.', '')}</option>`).join('') ||
+      '<option value="">no ports found</option>';
+    if (keep && r.ports.some(p => p.device === keep)) sel.value = keep;
+  } catch {}
+}
+const connectTo = port => fetch('/api/connect', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ port }) });
+$('connect').onclick = () => { if ($('port').value) connectTo($('port').value); };   // also retries the same port
+$('disconnect').onclick = () => connectTo(null);
+loadPorts(); setInterval(loadPorts, 5000);
+
+$('mark').onsubmit = e => { e.preventDefault(); const text = $('mark-text').value.trim(); if (!text) return;
+  fetch('/api/mark', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ text }) });
+  $('mark-text').value = ''; };
+poll();
+</script>
+</body>
+</html>

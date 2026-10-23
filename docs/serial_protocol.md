@@ -6,6 +6,8 @@ The Mega performs every control/localization operation. No PC heartbeat or Jetso
 
 USB: **115200, 8N1**, ASCII uppercase commands terminated with newline. CR is ignored. Command lines are at most 143 bytes, excluding newline. Invalid, oversized, or timed-out partial packets stop/disarm into a fault. Stop is accepted from either command port. `!` stops immediately even inside a damaged packet; remaining bytes are discarded through the next newline. The dashboard sends `!STOP\n` for its stop button.
 
+The supplied working car sketch confirms **Serial3 at 9600 baud** on D14/D15 for Bluetooth; `BLUETOOTH_UART=3` is now the core default. USB remains 115200.
+
 `BLUETOOTH_UART=0` shares Serial0 with USB. Both have **one baud rate**: a COM0 Bluetooth module must be configured to 115200 for this firmware, and must not contend with USB RX. A factory 9600-baud COM0 module does not work at the new core baud. Prefer the verified COM2/COM3 header at 9600 and set `BLUETOOTH_UART=2/3` for simultaneous Bluetooth control and USB telemetry. Confirm physical wiring before moving the module.
 
 The port that successfully sends `ARM` owns motion until `STOP`. The other port can read status and stop. Calibration requires `DISARMED`, so it cannot replace targets during a mission. `ARM` never starts motion itself.
@@ -35,7 +37,7 @@ The port that successfully sends `ARM` owns motion until `STOP`. The other port 
 
 Point names: `CENTER`, `TURN_LEFT`, `TURN_RIGHT`, `BOX_LEFT`, `BOX_RIGHT`. X/Y offsets must have magnitude 20–80 mm; YAW offsets 2–10°. See [the exact capture procedure](core_platform.md#capture-the-field-references) before collecting samples. Capturing a base records its raw ultrasonic returns. The known supplied XY/yaw and measured derivatives allow local fusion; the Mac does not compute them.
 
-Vendor Bluetooth A–H/Z buttons are retained for finite manual pulses and require ARM. One-letter packets without newline are accepted only after a 50 ms gap. Ordinary text packets time out after 500 ms. Commands do not use dynamic `String` allocation.
+Working-sketch Bluetooth button patterns are retained for finite manual pulses and require ARM: A forward, E backward, B/H right/left strafe, C/G CCW/CW, D/F the working sketch's forward-left/forward-right wheel patterns, Z stop. These names describe the core kinematics; verify actual assembled directions. The supplied App Inventor XML stores literal backslash+n suffixes; the parser accepts those only after one known A–H/Z letter. One-letter packets without newline are accepted after a 50 ms gap. Ordinary text packets time out after 500 ms. Commands do not use dynamic `String` allocation. The supplied app has no ARM action; its UI needs one on the Bluetooth port before driving the core. Merely opening the app cannot arm the robot.
 
 `CALIB` includes `field_width_mm=1500` (side-wall spacing) and `beacon_position_mask`. Bit 0 is left, bit 1 middle, bit 2 right. Default mask 2 defines only the origin; the two side lights' internal X=0 placeholders are unmeasured. All three positions must be explicitly configured before the position estimate can become valid. Beacons may have different X coordinates. EEPROM format is now v5, rejecting older calibration records.
 
@@ -56,7 +58,7 @@ ms,mode,armed,left45_mm,right45_mm,gyro_deg,gyro_dps,imu_ok,light_left,light_mid
 | `left45_mm`, `right45_mm` | Actual two front ±45° returns; −1 = invalid/stale/no echo |
 | `gyro_deg`, `gyro_dps`, `imu_ok` | Unwrapped integrated raw gyro yaw, rate and validity |
 | `light_left/middle/right`, `light_ok` | Independently resolved beacon channels, normalized ADC counts |
-| `red/green/blue/clear`, `color_ok` | Raw colour channels and validity; driver units differ (I²C RGBC counts vs frequency-counter edges normalized to 10 ms) |
+| `red/green/blue/clear`, `color_ok` | Raw colour channels and validity; driver units differ (I²C RGBC counts vs D32/PC5 sampled edges normalized to 10 ms of active exposure, at selected frequency scaling) |
 | `color`, `decision` | Current classification vs latched mission choice (`UNKNOWN`, `RED`, `GREEN`) |
 | `x_mm`, `y_mm`, `pose_ok` | Estimated world XY and validity; ignore numeric XY if pose_ok=0 |
 | `yaw_deg`, `heading_ok` | Fused world heading in ±180° and heading-reference validity |

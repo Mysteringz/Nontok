@@ -149,8 +149,30 @@ int main() {
   send("FWD 500");assert(!robot.armed());send("STOP");send("ARM");
 #if MOTOR_WIRING_CONFIRMED
   assert(robot.mode()==core::Mode::IDLE);send("FWD 500");assert(robot.mode()==core::Mode::MANUAL);
-  for(uint8_t i=0;i<4;++i) { assert(pwmValues[MOTOR_PWM[i]]>0);assert(directionValues[MOTOR_IN1[i]]==LOW); }
+  // Measured 23 Oct with wheels raised: forward is IN1 HIGH on M1/M3, LOW on M2/M4.
+  const uint8_t forwardLevels[]={HIGH,LOW,HIGH,LOW};
+  for(uint8_t i=0;i<4;++i) {
+    assert(pwmValues[MOTOR_PWM[i]]>0);assert(directionValues[MOTOR_IN1[i]]==forwardLevels[i]);
+    assert(directionValues[MOTOR_IN2[i]]!=forwardLevels[i]);
+  }
   for(int i=0;i<26;++i) { fakeMs+=20;loop(); }assert(robot.mode()==core::Mode::IDLE);
+  // Every course button keeps its motion, so wheel polarity is the old sketch's pattern
+  // negated: its "forward" drove toward the end the user now calls the back. Zero is stopped.
+  const int8_t coursePatterns[8][4]={{-1,1,-1,1},{-1,-1,1,1},{1,1,1,1},{0,1,-1,0},
+    {1,-1,1,-1},{-1,0,0,1},{-1,-1,-1,-1},{1,1,-1,-1}};
+  for(uint8_t button=0;button<8;++button) {
+    send("STOP");send("ARM");send(std::string(1,char('A'+button))+"\\n");
+    assert(robot.mode()==core::Mode::MANUAL);
+    for(uint8_t wheel=0;wheel<4;++wheel) {
+      int8_t expected=coursePatterns[button][wheel];
+      if(!expected) assert(pwmValues[MOTOR_PWM[wheel]]==0);
+      else {
+        assert(pwmValues[MOTOR_PWM[wheel]]>0);
+        assert(directionValues[MOTOR_IN1[wheel]]==(expected>0?LOW:HIGH));
+      }
+    }
+  }
+  send("Z\\n");assert(!robot.armed());
   send("STOP");send("ARM");send("FWD 500");send(std::string(160,'X')+"ARM");assert(robot.mode()==core::Mode::FAULT);
   send("STOP");send("ARM");send("DRIVE 80 0 nan 500");assert(robot.mode()==core::Mode::FAULT);
   send("STOP");send("ARM");send("FWD 500");send("!");assert(!robot.armed());
@@ -171,6 +193,7 @@ int main() {
   telemetrySent=telemetrySize;queueTelemetry(fakeMs,mockSensors);std::string row(telemetryRow,telemetrySize);
   assert(std::count(row.begin(),row.end(),',')==34&&row.back()=='\n');
   assert(MOTOR_PWM[0]==12&&MOTOR_PWM[1]==8&&MOTOR_PWM[2]==9&&MOTOR_PWM[3]==5);
+  assert(COLOR_S1==25&&COLOR_S0==28&&COLOR_S3==29&&COLOR_S2==30&&COLOR_OUT==32);
 #if MOEBIUS_LEGACY_M4_PINS
   assert(MOTOR_IN1[3]==26&&MOTOR_IN2[3]==27);
 #else

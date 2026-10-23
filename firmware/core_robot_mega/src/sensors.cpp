@@ -29,10 +29,25 @@ static bool colorReady=false;
 #endif
 #if COLOR_DRIVER == 2
 #if !defined(__AVR_ATmega2560__)
-#error "The frequency sensor counter requires ATmega2560 Timer5 and OUT on D47/T5"
+#error "The frequency sampler requires ATmega2560 D32/PC5"
 #endif
-static_assert(COLOR_OUT==47,"Timer5 external clock input is D47/T5, not an arbitrary GPIO");
+static_assert(COLOR_OUT==32,"Direct-port sampler input is D32/PC5, not an arbitrary GPIO");
+static_assert(F_CPU==core::COLOR_CPU_HZ,"Colour sampling timing requires a 16 MHz Mega");
+extern "C" uint8_t colorPulseBurst();
 static core::FrequencyColor frequencyColor;
+static core::FrequencyWindow sampleColor() {
+  core::FrequencyWindow window;
+  for(uint16_t burst=0;burst<core::COLOR_MAX_BURSTS;++burst) {
+    uint8_t status=SREG;cli();
+    uint8_t edges=colorPulseBurst();
+    SREG=status; // Restore interrupt state between every ~73 us burst.
+    window.edges+=edges;window.cycles+=core::COLOR_BURST_CYCLES;
+    if(burst+1>=core::COLOR_MIN_BURSTS&&window.edges>=64) break;
+    // Vary the unobserved gaps to avoid repeatedly sampling the same pulse phase.
+    delayMicroseconds((burst*13U)&31U);
+  }
+  return window;
+}
 static void selectColor(uint8_t channel) {
   digitalWrite(COLOR_S2,core::frequencyS2(channel)?HIGH:LOW);
   digitalWrite(COLOR_S3,core::frequencyS3(channel)?HIGH:LOW);
@@ -62,10 +77,7 @@ void sensorsBegin() {
   pinMode(COLOR_S0,OUTPUT);pinMode(COLOR_S1,OUTPUT);
   digitalWrite(COLOR_S0,HIGH);digitalWrite(COLOR_S1,LOW);
 #endif
-  // T5 counts edges in hardware; even 100% scaling does not create per-edge ISRs.
-  TCCR5A=0;TCCR5B=0;TCCR5C=0;TIMSK5=0;TCNT5=0;
-  TIFR5=_BV(TOV5)|_BV(OCF5A)|_BV(OCF5B)|_BV(OCF5C)|_BV(ICF5);
-  TCCR5B=_BV(CS52)|_BV(CS51)|_BV(CS50); // External T5 clock, rising edge.
+  // D47 belongs to ultrasonic ECHO. Sampling D32 leaves all timers untouched.
   selectColor(0);frequencyColor.begin(micros());
 #endif
   uint8_t identity;
@@ -118,19 +130,19 @@ void sensorsUpdate() {
     lastColorMs=millis();
   }
 #elif COLOR_DRIVER == 2
-  // The sample time is immediately adjacent to the hardware-counter read.
-  // No timer ISR touches TCNT5; AVR low-byte reads latch its high byte.
-  uint32_t sampleUs=micros();uint16_t counter=TCNT5;
-  core::FrequencyStep step=frequencyColor.update(sampleUs,counter);
-  if(step.frameReady) {
-    readings.colorValid=frequencyColor.valid();
-    if(readings.colorValid) {
-      for(uint8_t i=0;i<4;++i) readings.rgba[i]=frequencyColor.value(i);
-      ++readings.colorSequence;
+  if(frequencyColor.ready(micros())) {
+    core::FrequencyWindow window=sampleColor();
+    core::FrequencyStep step=frequencyColor.update(micros(),window);
+    if(step.frameReady) {
+      readings.colorValid=frequencyColor.valid();
+      if(readings.colorValid) {
+        for(uint8_t i=0;i<4;++i) readings.rgba[i]=frequencyColor.value(i);
+        ++readings.colorSequence;
+      }
+      lastColorMs=millis();
     }
-    lastColorMs=millis();
+    if(step.filterChanged) selectColor(frequencyColor.channel());
   }
-  if(step.filterChanged) selectColor(frequencyColor.channel());
 #endif
   uint32_t completed=millis();
   for(uint8_t i=0;i<2;++i) if(completed-rangeAt[i]>350) readings.range[i]=-1;

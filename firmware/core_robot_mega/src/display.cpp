@@ -5,6 +5,8 @@
 #include <Wire.h>
 #if OLED_DRIVER == 1
 static U8X8_SSD1306_128X64_NONAME_HW_I2C oled(U8X8_PIN_NONE);
+#elif OLED_DRIVER == 3
+static U8X8_SSD1306_128X32_UNIVISION_HW_I2C oled(U8X8_PIN_NONE);
 #else
 static U8X8_SH1106_128X64_NONAME_HW_I2C oled(U8X8_PIN_NONE);
 #endif
@@ -28,11 +30,17 @@ void displayUpdate(const core::Controller& controller, const core::Sensors& sens
   if (!available || millis()-lastDraw < 250) return;
   lastDraw = millis();
   oled.clearLine(0); oled.drawString(0,0,core::modeName(controller.mode()));
+#if OLED_DRIVER == 3
+  oled.clearLine(1);oled.setCursor(0,1);oled.print("L ");oled.print(sensors.range[0]);oled.print(" R ");oled.print(sensors.range[1]);
+  oled.clearLine(2);oled.setCursor(0,2);oled.print("Yaw ");oled.print(sensors.heading,1);
+  oled.clearLine(3);oled.drawString(0,3,controller.mode()==core::Mode::FAULT?"FAULT: USE STOP":"MEGA CORE");
+#else
   oled.clearLine(2); oled.setCursor(0,2); oled.print("Left45 "); oled.print(sensors.range[0]);
   oled.clearLine(3); oled.setCursor(0,3); oled.print("Right45 "); oled.print(sensors.range[1]);
 
   oled.clearLine(5); oled.setCursor(0,5); oled.print("Yaw "); oled.print(sensors.heading,1);
   oled.clearLine(7); oled.drawString(0,7,controller.mode()==core::Mode::FAULT?"FAULT: USE STOP":"MEGA CORE");
+#endif
 #else
   (void)controller; (void)sensors;
 #endif

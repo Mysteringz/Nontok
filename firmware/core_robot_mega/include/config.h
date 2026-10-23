@@ -24,15 +24,19 @@ const uint8_t MOTOR_IN2[4] = {35, 36, 42, 27};
 const uint8_t MOTOR_IN1[4] = {34, 37, 43, A4};
 const uint8_t MOTOR_IN2[4] = {35, 36, 42, A5};
 #endif
-const int8_t MOTOR_SIGN[4] = {-1, -1, -1, -1}; // Verify each wheel raised off floor.
+// Measured 23 Oct with wheels raised (dashboard identify): FL=M1, FR=M2, RL=M3, RR=M4;
+// wheel-forward (toward the ultrasonic end) is raw + on M1/M3 and raw - on M2/M4.
+// This is the negation of the old sketch's ADVANCE, which drove toward the other end.
+const int8_t MOTOR_SIGN[4] = {1, -1, 1, -1};
 const float MAX_WHEEL_MM_S = 400; // Nominal PWM calibration, not odometry.
 const float ROTATION_ARM_MM = 160; // Half track + half wheelbase; measure.
 const uint8_t MIN_PWM = 60, MAX_PWM = 120;
 
-// 0: Bluetooth shares Serial0/USB (vendor default). 2: Serial2. 3: Serial3.
+// Working sketch: Bluetooth Serial3, TX3 D14 / RX3 D15, 9600 baud.
+// 0: shared Serial0/USB. 2: Serial2. 3: Serial3.
 // If using 0, USB and Bluetooth must not drive the RX line simultaneously.
 #ifndef BLUETOOTH_UART
-#define BLUETOOTH_UART 0
+#define BLUETOOTH_UART 3
 #endif
 #if BLUETOOTH_UART != 0 && BLUETOOTH_UART != 2 && BLUETOOTH_UART != 3
 #error "BLUETOOTH_UART must be 0, 2 or 3"
@@ -41,9 +45,19 @@ const unsigned long USB_BAUD = 115200;
 // Serial0 has one baud: a COM0 Bluetooth module must also be set to 115200.
 const unsigned long BLUETOOTH_BAUD = BLUETOOTH_UART == 0 ? USB_BAUD : 9600;
 
-// Proposed free pins: verify against the installed cables before enabling.
-const uint8_t RANGE_TRIG[2] = {22, 24};
-const uint8_t RANGE_ECHO[2] = {30, 25}; // Avoid legacy encoder pin 23.
+// User-reported 2026-10-23 (plugs swapped after a left-cable fault):
+// left PL1/PL2 = D48 TRIG / D47 ECHO, right PG1/PG0 = D40 TRIG / D41 ECHO.
+#ifndef RANGE_LEFT_ECHO_PIN
+#define RANGE_LEFT_ECHO_PIN 47
+#endif
+const uint8_t RANGE_TRIG[2] = {48, 40};
+const uint8_t RANGE_ECHO[2] = {RANGE_LEFT_ECHO_PIN, 41};
+// User-reported 2026-10-23: four LDR channels, physically left to right, on A0/A7/A2/A6
+// (A1 and A3 not used; A4/A5 belong to M4). Four channels, NOT three identified beacons.
+constexpr uint8_t LIGHT_SENSOR_PIN[4] = {A0,A7,A2,A6};
+static_assert(LIGHT_SENSOR_PIN[0]!=A4&&LIGHT_SENSOR_PIN[1]!=A4&&LIGHT_SENSOR_PIN[2]!=A4&&LIGHT_SENSOR_PIN[3]!=A4&&
+  LIGHT_SENSOR_PIN[0]!=A5&&LIGHT_SENSOR_PIN[1]!=A5&&LIGHT_SENSOR_PIN[2]!=A5&&LIGHT_SENSOR_PIN[3]!=A5,
+  "Light inputs cannot use A4/A5: they are the M4 direction pins on the updated shield");
 // Each channel must measure ONE distinguishable beacon. Combined brightness is unsupported.
 #ifndef LIGHT_DRIVER
 #define LIGHT_DRIVER 0
@@ -51,10 +65,11 @@ const uint8_t RANGE_ECHO[2] = {30, 25}; // Avoid legacy encoder pin 23.
 #if LIGHT_DRIVER < 0 || LIGHT_DRIVER > 1
 #error "LIGHT_DRIVER: 0 unidentified, 1 three independent analog strength channels"
 #endif
-const uint8_t LIGHT_PIN[3] = {A6,A7,A8}; // left, middle, right beacon
-const bool LIGHT_HIGH_IS_BRIGHT = true;
-const uint8_t IMU_ADDRESS = 0x68; // MPU6050, verify/probe before confirmation.
-const float GYRO_SIGN = 1.0f; // Positive CCW, check physical mounting.
+// Legacy adapter proposal only; the reported four-channel interface is not decoded yet.
+const uint8_t LIGHT_PIN[3] = {A6,A7,A8}; // left, middle, right resolved beacon strengths
+const bool LIGHT_HIGH_IS_BRIGHT = false; // Measured 23 Oct: covering an LDR raises its reading.
+const uint8_t IMU_ADDRESS = 0x68; // MPU6050 identified 2026-10-23 on the shield IMU header (D20/D21).
+const float GYRO_SIGN = 1.0f; // Positive CCW. Chip Z points down, so expect -1: confirm by rotation.
 // 0 off; 1 TCS34725 I2C; 2 TCS230/TCS3200-compatible frequency module.
 // IMG_3849 shows GND/OUT/S2/S3/VCC: select 2, but wiring stays gated below.
 #ifndef COLOR_DRIVER
@@ -64,26 +79,35 @@ const float GYRO_SIGN = 1.0f; // Positive CCW, check physical mounting.
 #error "COLOR_DRIVER must be 0, 1 or 2"
 #endif
 const uint8_t COLOR_ADDRESS = 0x29;
-// Use the visible five-pin header without driving unverified S0/S1/OE connections.
-// Their location, enabled levels and scaling must be verified on the full board.
+// User reports all five signal endpoints and confirms a four-wire OLED (no reset).
+// D28 is available for S0. S0=HIGH/S1=LOW selects 20% frequency scaling.
 #ifndef COLOR_SCALE_PINS_EXPOSED
-#define COLOR_SCALE_PINS_EXPOSED 0
+#define COLOR_SCALE_PINS_EXPOSED 1
 #endif
 #if COLOR_SCALE_PINS_EXPOSED != 0 && COLOR_SCALE_PINS_EXPOSED != 1
 #error "COLOR_SCALE_PINS_EXPOSED must be 0 or 1"
 #endif
-const uint8_t COLOR_S2=44,COLOR_S3=45,COLOR_OUT=47; // D47/PL2 = Timer5 external clock T5.
-#if COLOR_SCALE_PINS_EXPOSED
-const uint8_t COLOR_S0=40,COLOR_S1=41; // Optional full-header module only, 20% scaling.
+const uint8_t COLOR_S2=30,COLOR_S3=29,COLOR_OUT=32; // PC7, PA7, PC5.
+#if SENSOR_WIRING_CONFIRMED && COLOR_DRIVER == 2
+static_assert(RANGE_LEFT_ECHO_PIN!=COLOR_OUT,
+  "Colour OUT cannot share the left ultrasonic ECHO input");
 #endif
-// Driver 2 exclusively owns Timer5. No Servo library / PWM 44,45,46 in this sketch.
+const uint8_t COLOR_S0=28,COLOR_S1=25; // PA6, PA3, as reported by user.
+#ifndef OLED_RESET_ON_D28
+#define OLED_RESET_ON_D28 0
+#endif
+#if SENSOR_WIRING_CONFIRMED && COLOR_DRIVER == 2 && COLOR_SCALE_PINS_EXPOSED && OLED_RESET_ON_D28
+#error "Colour S0 D28 cannot also drive a physically connected OLED reset wire"
+#endif
+// Driver 2 reserves D32/PC5; no timer is reconfigured by colour sampling.
+// Serial3 Bluetooth and I2C OLED stay unchanged. D19 is no longer reserved.
 // All sensor hardware access remains disabled until SENSOR_WIRING_CONFIRMED=1.
 
-// 0 off; 1 SSD1306 128x64 I2C; 2 SH1106 128x64 I2C. Verify display first.
+// 0 off; 1 SSD1306 128x64; 2 SH1106 128x64; 3 SSD1306 128x32 (working sketch).
 #ifndef OLED_DRIVER
 #define OLED_DRIVER 0
 #endif
-#if OLED_DRIVER < 0 || OLED_DRIVER > 2
-#error "OLED_DRIVER must be 0, 1 or 2"
+#if OLED_DRIVER < 0 || OLED_DRIVER > 3
+#error "OLED_DRIVER must be 0, 1, 2 or 3"
 #endif
 const uint8_t OLED_ADDRESS = 0x3c; // Mega SDA=20, SCL=21.

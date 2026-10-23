@@ -26,15 +26,19 @@ The current user-specified competition sequence is:
 4. Navigate to the corresponding recorded box pose, align precisely, then latch the motors stopped and finish.
 5. Stream sensor/localization/motion state to this Mac, retaining recordings and time graphs.
 
-### Completion status — 20 October 2026
+### Completion status — 23 October 2026
 
-**The core software is implemented and software-tested against the mission above and the current sensor assumptions. The robot is awaiting hardware integration, calibration and arena trials; it is not yet verified competition-ready.** No firmware has been uploaded to the physical robot in this work.
+**The core software is implemented and software-tested against the mission above and the current sensor assumptions. The robot is awaiting hardware integration, calibration and arena trials; it is not yet verified competition-ready.** A user-approved motor-inhibited diagnostic is now installed; the competition firmware has not been uploaded.
+
+**Working-car update — 23 October 2026:** the supplied `Car_Volt_Feedback_24A.ino` confirms M4 directions **A4/A5**, Bluetooth **Serial3 at 9600**, SSD1306 **128×32 at 0x3c**, and forward wheel polarity `{-1,+1,-1,+1}`. The user confirmed physically moving light A's left signal **A4→A6** and powering both light modules; analogue inputs are now A6/A3 and A2/A1. Ultrasonics stay D40/D41 and D48/D47. The user's exact colour wiring is **S1=D25, S0=D28, S3=D29, S2=D30, OUT=D32**; PINC/PC5 burst sampling and 20% scaling replace the earlier proposed pins. The four-wire OLED has no reset lead; the unused D28 reset assignment from the working sketch is not retained. **No gyro is connected yet.** The competition build's motor/sensor gates remain off; the installed diagnostic holds motor PWM LOW. Four-channel beacon decoding is still pending. See [the working-car reference](docs/working_car_reference.md).
+
+**Connected-board probe:** `/dev/cu.wchusbserial210` confirmed ATmega2560 signature `0x1e9801`; existing flash and EEPROM were backed up and verified. The approved motor-inhibited diagnostic produced two captures of 48 live samples each. In the latest capture at **15:35 HKT**, A6 was **422–553**, A1 **478–650**, and A3/A2 stayed **zero**. Right ultrasound received **48/48** valid echoes (median **210 mm**); left had no valid echo. Only I²C **0x3c** responded; the absent gyro response is expected because none is installed. Colour OUT D32 produced pulses, with colour controls untouched. These are probe observations, not calibrated navigation. The diagnostic remains installed with motor PWM LOW. The old sketch was not restored because its D47/D48 Servo outputs conflict with the ultrasonics. See [the captured findings and next checks](docs/working_car_reference.md#follow-up-after-wiring-and-power-confirmation).
 
 | Delivered | What is implemented |
 |---|---|
 | Standalone Mega firmware | PlatformIO project, centre approach, fresh colour voting, green/left or red/right 90° turn, taught-box navigation and a terminal motor-stop latch; telemetry continues after finishing |
 | Onboard localization | Adapter for three independent beacon strengths, measured beacon XY, gyro heading reference and local fusion with the two front ±45° ultrasonic sensors |
-| Sensor and shield support | MOEBIUS motor pin profiles, frequency-output colour driver selected from the pictured header, alternate I²C colour driver, MPU6050 driver and optional OLED; wiring remains unconfirmed |
+| Sensor and shield support | MOEBIUS motor pin profiles, frequency-output colour driver selected from the pictured header, alternate I²C colour driver, MPU6050 driver and optional OLED; partial live checks complete, no gyro installed |
 | Manual control and fault handling | Bounded USB/Bluetooth moves, timed demo, explicit stop, sensor/clearance checks, loop and mission timeouts, and arming/calibration interlocks |
 | Calibration | Colour references, centre/turn/box pose captures and measured ultrasonic derivatives, calibration validation, and redundant CRC-protected EEPROM storage (format v5) |
 | Local Mac dashboard | Live sensor/state displays, selectable time graphs, field view, commissioning controls, SQLite recordings, replay and complete CSV exports |
@@ -42,6 +46,8 @@ The current user-specified competition sequence is:
 | Guides and checks | Hardware/pin documentation, commissioning and serial command guides, synthetic mission/survey tests, dashboard persistence/HTTP tests and AVR compile checks |
 
 The earlier Jetson-based core was replaced. **All core decisions and field fitting run on the Mega.** The Mac displays/records telemetry and sends operator commands. The separate self-proposed Jetson application in part B was preserved and is outside this core implementation.
+
+**Continuing in Claude:** read [the core handover and prioritized TODO](docs/core_claude_handover.md) for the installed diagnostic, confirmed wiring, backups, live readings, unresolved work and verification commands.
 
 ### What the field survey does
 
@@ -51,7 +57,7 @@ The survey is guided: keep motors disarmed, rotate/reposition the robot by hand 
 
 ### What remains before a real competition run
 
-1. Connect the Mega and identify the actual wiring, shield revision, motor directions, gyro, OLED and beacon interface. The colour photo shows `GND/OUT/S2/S3/VCC`, consistent with a TCS230/TCS3200 frequency interface; exact chip identity and cable endpoints remain unverified. `COLOR_DRIVER=2` is selected, but motor/sensor access flags default off.
+1. Complete the connected-board checks: test A3/A2 under controlled illumination, test left ultrasound against a flat reflector along its beam, install and identify the gyro, and verify motor directions with wheels raised. The colour interface is consistent with TCS230/TCS3200, but exact chip identity and controlled RGB response remain unverified. `COLOR_DRIVER=2` is selected, but competition motor/sensor access flags default off.
 2. Confirm or adapt the beacon driver. The current optional analog adapter requires three separately resolved strengths; distinguishable beacons alone do not prove that the installed interface supplies these values. A different interface or unsuitable strength-to-distance response needs a driver/model change.
 3. Measure sensor mounts and offsets, validate gyro sign and timing, survey/check the field, and calibrate optical response at independent measured positions and headings. Side-light forward positions and height differences remain unmeasured.
 4. Capture red/green colour references and the centre, left/right turn and actual box poses, including local ultrasonic offset samples. Box locations are still to be supplied. Save calibration; EEPROM formats older than v5 require re-entering it.
@@ -69,6 +75,8 @@ Checked on **20 October 2026**:
 - Regression checks for the preserved proposed application passed: **22** Jetson tests and its separate Mega sketch compilation. These are software checks, not a proposed-application hardware demo.
 
 Repeatable commands are listed under [Verification](#verification).
+
+**23 October colour-driver update:** `COLOR_DRIVER=2` now uses the reported D32/PC5 input and D25/D28/D29/D30 controls, retaining the 10 ms-normalized telemetry units. Instruction-level tests cover 744 square-wave cases, balanced nine-cycle input spacing and bounded execution, alongside missing/stale-window rejection and complete-frame recovery. Host tests also compare all eight course button motor patterns, literal backslash+n framing and exact colour pin constants. The `mega2560_oled` profile now targets the working 128×32 display. Hardware waveform, serial/loop timing and colour accuracy remain unverified. Re-capture red/green calibration after wiring and commissioning. Sensor/motor access gates remain off by default.
 
 ## B. Self-proposed application: Lab Assistant
 
@@ -92,6 +100,7 @@ Only edit paths that belong to your part. To change something the other part own
 | Path | Owner |
 |---|---|
 | `firmware/core_robot_mega/` | A (core) |
+| `firmware/hardware_probe_mega/`, `docs/core_claude_handover.md`, `docs/working_car_reference.md` | A |
 | `platformio.ini`, `dashboard/`, `tools/start_dashboard.sh`, `tools/telemetry_schema.py` | A |
 | `tests/` (repo root), `tools/verify_core.py`, `tools/record_telemetry.py` | A |
 | `docs/core_platform.md`, `docs/hardware.md`, `docs/serial_protocol.md`, `docs/core_survey.md` | A |
@@ -121,14 +130,14 @@ The Mega runs **one sketch at a time**. Flash `core_robot_mega` for the parking 
 | Pins | Use | Claimed by | Status |
 |---|---|---|---|
 | PWM 12, 8, 9, 5; DIR1/DIR2 34/35, 37/36, 43/42, A4/A5 (legacy 26/27) | 4 mecanum motors (MOEBIUS TB6612 shield) | A (B copies) | Manufacturer map; revision/wheel signs need physical verification |
-| 0 / 1 (Serial0) | Core USB monitor/logging; optional shared Bluetooth | both | Use COM2/COM3 Bluetooth for simultaneous USB logging |
+| 0 / 1 (Serial0); 14 / 15 (Serial3) | USB logging; Bluetooth TX3/RX3 | both | Working sketch confirms Serial3 at 9600; USB 115200 |
 | 22/23, 24/25, 26/27 | Ultrasonic front, left, right (trig/echo) | B | TODO wire |
 | 20 / 21 (I2C) | MPU6050 and optional core OLED | A / B | Confirm addresses/models and wiring |
 | 10 | Camera tilt servo | B | TODO: match a shield servo header |
 | A0 | Wireless charging receiver voltage (through a divider) | B | TODO wire |
-| 22/30, 24/25 | Core front ultrasonic +45° left / −45° right | A | Proposed pins; two-sensor mounting specified by user, wiring unconfirmed |
-| A6 / A7 / A8 | Core separately resolved left/middle/right beacon channels | A | Analog option only; actual interface unconfirmed |
-| 44 / 45 / 47 (S2 / S3 / OUT) | Core frequency colour interface | A | Header identified in IMG_3849; proposed Mega endpoints unconfirmed; Timer5 reserved |
+| 40/41 (PG1/PG0), 48/47 (PL1/PL2) | Core left/right ultrasonic TRIG/ECHO | A | User-reported 23 Oct; right ECHO stays D47 |
+| A6/A3, A2/A1 | Light sensors A/B, each left/right analogue outputs | A | User confirmed A4→A6 move and power; four-channel decoding pending |
+| 25 / 28 / 29 / 30 / 32 (S1 / S0 / S3 / S2 / OUT) | Core frequency colour interface | A | User-reported ports; D32/PC5 sampled directly; no timer ownership |
 
 **Sensor placement must work for both parts.** The core now follows the user's two front ±45° ultrasonic layout and front underside colour sensor. Its former three-sensor assumption is removed. The proposed application still has its own front/left/right assumptions; reconcile them before sharing hardware.
 
@@ -185,7 +194,7 @@ arduino-cli compile --fqbn arduino:avr:mega --build-path /tmp/nontok-assistant-b
 Add a line here, and remove it once the other part has dealt with it.
 
 - **B → A:** Once the motor pins and signs are confirmed on the real board, update `docs/hardware.md`. B will copy them into `firmware/lab_assistant_mega/config.h`.
-- **A → B:** Core sensor pins are claimed above. Reconcile front echo pin 30 and the user-specified TWO front ±45° sensors before sharing wiring. Pin 23 can conflict with the legacy shield encoder; 26/27 can conflict with legacy M4 directions.
+- **A → B:** Working course code confirms M4 A4/A5, forward signs {-1,+1,-1,+1}, Bluetooth Serial3/9600 and OLED SSD1306 128×32. Core target wiring: ultrasound D40/D41,D48/D47; light A6/A3,A2/A1 (physical A4→A6 move confirmed); colour S1/S0/S3/S2/OUT D25/D28/D29/D30/D32. No gyro is connected yet. The old servo attachments on D47/D48 conflict with ultrasonics and must be reconciled before sharing wiring. See `docs/working_car_reference.md`.
 - **A → B:** Core motor map now follows the MOEBIUS vendor schematic and lives under `include/config.h`; compare signs/revision before updating the proposed sketch.
 - **Physical commissioning:** Verify shield revision, remaining sensor models and mounting. IMG_3849 establishes the colour module header, but not its Mega cable endpoints or exact chip marking.
 
@@ -197,11 +206,14 @@ docs/
   core_platform.md             A  Mega-only competition, calibration and dashboard
   core_survey.md               A  guided wall/beacon survey, captures and exports
   hardware.md                  A  shield pin profile, commissioning
+  working_car_reference.md     A  supplied working sketch, exact wiring and USB probe facts
+  core_claude_handover.md       A  continuation context, prioritized TODO and verification
   serial_protocol.md           A  MEGA3 onboard command/CSV protocol
   state_machine.md             B  S0–S9 / T1–T16 → code
   lab_assistant_protocol.md    B  TEL/VEL protocol
 firmware/
   core_robot_mega/             A  include/ configuration and src/ Mega controller
+  hardware_probe_mega/         A  installed motor-inhibited sensor diagnostic
   lab_assistant_mega/          B  motors + heading hold, ultrasonic, gyro, servo, charger
 jetson/
   lab_assistant/

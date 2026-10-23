@@ -9,6 +9,10 @@
 #define LOW 0
 #define OUTPUT 1
 #define INPUT 0
+#define A0 54
+#define A1 55
+#define A2 56
+#define A3 57
 #define A4 58
 #define A5 59
 #define A6 60
