@@ -54,7 +54,7 @@ static const unsigned long BLUETOOTH_BAUD=9600;
 static uint32_t lastSample=0,sampleCount=0,btQuietUntil=0,btPingMs=0;
 static bool btPinged=false;
 static bool btHostPresent() { return btPinged&&millis()-btPingMs<5000&&int32_t(millis()-btQuietUntil)>=0; }
-struct LineReader { char line[48];uint8_t used=0;bool dropping=false; };  // GO carries 7 numbers.
+struct LineReader { char line[48];uint8_t used=0;bool dropping=false; };  // Room for REF/WMAP lines.
 static LineReader usbReader,btReader;
 // Event lines go to both links.
 class BothLinks : public Print {
@@ -416,34 +416,45 @@ static void fastSample(Print& o,const uint16_t* adc,const int16_t* us,const uint
   o.println();
 }
 // ---- Tournament step tests ----------------------------------------------------------------
-// The console sends one command per step, with targets from the calibration captures. The
-// loop runs here: Bluetooth's 5 Hz data arrives 100-300 ms late, too late to stop a turn.
+// The console sends one step at a time with targets from the calibration captures. The loop
+// runs here: Bluetooth's 5 Hz data arrives 100-300 ms late, too late to stop a turn.
 // Ranges: 0 left 45, 1 right 45, 2 front, 3 left side, 4 right side.
 //   WMAP m s m s m s m s  wheel map from the console: motor 1-4 and forward sign, FL FR RL RR.
-//   GO mode front lat h45 maxpwm mean45 minpwm  drive until the readings match a capture:
-//     1 checkpoint P: strafe on the side pair and turn until left/right 45 match (there their
-//       beams reach the side walls); on arrival the heading is stored as square.
-//     2 checkpoint N: side pair, heading held by gyro at square. Near the back wall the 45s
-//       see the back wall instead, which reverses their meaning.
-//     3/4 park after a left/right turn: lateral from the right/left side sensor, which then
-//       faces the back wall; heading held at square +/-90.
-//   TURN deg maxpwm minpwm  gyro turn to square+deg (CCW +), or current heading+deg if not
-//     squared yet.
-// Any stop, a 30 s (turn 10 s) timeout, lost sensors or an unzeroed gyro ends a step.
+//   REF front ls rs l45 r45  the recorded readings of the target checkpoint; 9999 = the capture
+//     had no steady reading there, so that sensor is not used.
+//   GO base creep probe maxpwm minpwm  drive until the readings match REF, in the robot's frame:
+//     the front sensor sets the distance, the side sensors the capture had set the sideways
+//     position. base 0 holds the current heading, 1 the stored reference heading. creep 1 lets
+//     the robot creep forward and centre on the 45s until its sensors reach the walls (start).
+//     probe 1 then fixes the heading from the recorded 45 readings: it turns +3 and -3 deg,
+//     measures how each beam changes per degree (wall geometry unknown) and corrects by
+//     (recorded - measured) / slope. On arrival the heading is stored as the reference.
+//   TURN deg maxpwm minpwm  gyro turn to the reference heading + deg (CCW +), or the current
+//     heading + deg if none is stored; stores that target as the reference.
+// Any stop, a 40 s (turn 10 s) timeout, lost sensors or an unzeroed gyro ends a step.
 static const float GYRO_SCALE=1.009f;         // Hand test 27 Oct: 4 x 90 deg left read 357.4.
 static const float STEP_X_FULL_MM=250,STEP_Y_FULL_MM=150,STEP_YAW_FULL_DEG=25;
-static const float STEP_H45_DEG_PER_MM=0.02f;  // Heading nudge from left/right 45 asymmetry.
 static const float STEP_BRAKE_S=0.06f;         // Cut power this long before reaching a heading.
 static const float STEP_UNKNOWN=9999;          // Error not measured yet.
-static const int16_t STEP_FRONT_GUARD_MM=70;
+static const int16_t STEP_NO_REF=9999;         // Reference the capture did not have.
+static const float PROBE_DEG=3,PROBE_MAX_FIX_DEG=8,PROBE_MIN_SLOPE=3; // slope in mm per deg
+// Closer than this the beam cone (+/-7.5 deg) finds the same nearest surface whichever way it
+// points (e.g. both 45s ~150 mm in a parking corner): no heading information, so not probed.
+static const int16_t PROBE_MIN_RANGE_MM=200;
+static const uint8_t GO_POS=0,GO_PLUS=1,GO_MINUS=2,GO_ZERO=3,GO_FINAL=4;
 static int16_t usLatest[US_COUNT]={-1,-1,-1,-1,-1};static uint16_t usSeq=0; // Set by sample().
 static int8_t wheelMotor[4]={-1,-1,-1,-1},wheelSign[4]={};
-static uint8_t stepMode=0;static bool squareValid=false;
-static int16_t refFront=0,refLat=0,refH45=0,refMean45=0,stepMaxPwm=0,stepMinPwm=0;
-static float yawTarget=0,squareYaw=0,stepEx=0,stepEy=0,stepEh=0,goUx=0,goUy=0;
+static int16_t ref[US_COUNT]={STEP_NO_REF,STEP_NO_REF,STEP_NO_REF,STEP_NO_REF,STEP_NO_REF}; // l45 r45 front ls rs
+static bool refYawValid=false,goCreep=false,goProbe=false;
+static int16_t stepMaxPwm=0,stepMinPwm=0;
+static uint8_t goPhase=GO_POS,probesDone=0,probeReads=0;
+static float yawTarget=0,refYaw=0,stepEx=0,stepEy=0,goUx=0,goUy=0,probeBase=0,probeFix=0;
+static float probeSum[3][2]={},probeN[3][2]={};  // phase PLUS/MINUS/ZERO x beam L/R
 static uint32_t stepStartMs=0,stepCtrlMs=0,stepSettledMs=0,stepSensorsOkMs=0;static uint16_t stepUsSeen=0;
 static float yawDeg() { return -angle[2]*GYRO_SCALE; }  // CCW positive: the chip's Z points down.
 static float yawRateDps() { return -(lastRaw[2]-bias[2])/core::MPU_GYRO_LSB_PER_DPS*GYRO_SCALE; }
+static bool hasRef(uint8_t i) { return ref[i]!=STEP_NO_REF; }
+static bool probeBeam(uint8_t b) { return hasRef(b)&&ref[b]>=PROBE_MIN_RANGE_MM; }
 static bool parseInts(const char* text,int16_t* v,uint8_t n) {
   for(uint8_t i=0;i<n;++i) {
     char* end;long value=strtol(text,&end,10);
@@ -471,78 +482,113 @@ static void driveMix(float ux,float uy,float uw) {
 }
 static void stepEnd(bool reached,const __FlashStringHelper* reason) {
   haltMotors();
-  if(reached&&stepKind==STEP_GO&&stepMode==1) { squareYaw=yawDeg();squareValid=true; }
+  if(reached) { refYaw=stepKind==STEP_TURN?yawTarget:yawDeg();refYawValid=true; }
   out.print(F("{\"type\":\"step_end\",\"kind\":\""));out.print(stepKind==STEP_TURN?F("turn"):F("go"));
-  out.print(F("\",\"mode\":"));out.print(stepMode);
-  out.print(F(",\"result\":\""));out.print(reached?F("reached"):F("aborted"));
+  out.print(F("\",\"result\":\""));out.print(reached?F("reached"):F("aborted"));
   out.print(F("\",\"reason\":\""));out.print(reason);
   out.print(F("\",\"ex_mm\":"));out.print(stepEx,0);out.print(F(",\"ey_mm\":"));out.print(stepEy,0);
-  out.print(F(",\"eh45_mm\":"));out.print(stepEh,0);
+  out.print(F(",\"probes\":"));out.print(probesDone);out.print(F(",\"probe_fix_deg\":"));out.print(probeFix,2);
   out.print(F(",\"yaw_err_deg\":"));out.print(yawTarget-yawDeg(),2);out.print(F(",\"yaw_deg\":"));out.print(yawDeg(),2);
-  out.print(F(",\"square\":"));out.print(squareValid);out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+  out.print(F(",\"ref_heading\":"));out.print(refYawValid);out.print(F(",\"ms\":"));out.print(millis());out.println('}');
   stepKind=STEP_IDLE;
 }
-static bool stepBegin(uint8_t kind,uint8_t mode,int16_t maxPwm,int16_t minPwm) {
+static bool stepBegin(uint8_t kind,int16_t maxPwm,int16_t minPwm) {
   if(wheelMotor[0]<0) { out.println(F("{\"error\":\"STEP_NEEDS_WMAP\"}"));return false; }
   if(!gyroRunning||!biasValid) { out.println(F("{\"error\":\"STEP_NEEDS_ZEROED_GYRO\"}"));return false; }
-  stepKind=kind;stepMode=mode;
-  stepMaxPwm=constrain(maxPwm,40,int16_t(DRIVE_PWM_MAX));stepMinPwm=constrain(minPwm,0,stepMaxPwm);
+  stepKind=kind;stepMaxPwm=constrain(maxPwm,40,int16_t(DRIVE_PWM_MAX));stepMinPwm=constrain(minPwm,0,stepMaxPwm);
   stepStartMs=stepCtrlMs=stepSensorsOkMs=millis();stepSettledMs=0;stepUsSeen=usSeq;
-  stepEx=stepEy=STEP_UNKNOWN;stepEh=0;goUx=goUy=0;
+  stepEx=stepEy=STEP_UNKNOWN;goUx=goUy=0;goPhase=GO_POS;probesDone=0;probeFix=0;
   return true;
 }
 static void stepStarted() {
   out.print(F("{\"type\":\"step_start\",\"kind\":\""));out.print(stepKind==STEP_TURN?F("turn"):F("go"));
-  out.print(F("\",\"mode\":"));out.print(stepMode);out.print(F(",\"yaw_target_deg\":"));out.print(yawTarget,2);
-  out.print(F(",\"square\":"));out.print(squareValid);out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+  out.print(F("\",\"yaw_target_deg\":"));out.print(yawTarget,2);out.print(F(",\"ref_heading\":"));out.print(refYawValid);
+  out.print(F(",\"ms\":"));out.print(millis());out.println('}');
 }
-// New ranges: errors, translation commands and (checkpoint P only) the heading nudge.
+// New ranges: position errors and translation commands, in the robot's frame.
 static void goUpdate(uint32_t now) {
   int16_t l45=usLatest[0],r45=usLatest[1],front=usLatest[2],ls=usLatest[3],rs=usLatest[4];
-  bool okX=true,okY=true;
-  if(refFront>0&&front>0) stepEx=front-refFront;                       // + = drive forward
-  else if(refMean45>0&&l45>0&&r45>0) stepEx=(l45+r45)*0.5f-refMean45;
-  else { okX=false;stepEx=STEP_UNKNOWN; }
-  if(stepMode<=2&&ls>0&&rs>0) stepEy=((ls-rs)-refLat)*0.5f;            // + = strafe left
-  else if(stepMode==3&&rs>0) stepEy=-(rs-refLat);                      // right side sees the back wall
-  else if(stepMode==4&&ls>0) stepEy=ls-refLat;                         // left side sees the back wall
-  else { okY=false;stepEy=STEP_UNKNOWN; }
-  stepEh=l45>0&&r45>0?(l45-r45)-refH45:0;
-  // On side walls, turning CCW shortens the left 45 beam: a positive asymmetry means turn CCW.
-  // Only once centred, and only while the back wall is farther than the side walls.
-  if(stepMode==1&&l45>0&&r45>0&&okY&&fabsf(stepEy)<40&&fabsf(stepEh)>8&&(front<=0||front>(ls+rs)/2))
-    yawTarget+=constrain(STEP_H45_DEG_PER_MM*stepEh,-1.0f,1.0f);
-  if(okX&&okY) stepSensorsOkMs=now;
-  goUx=okX?(fabsf(stepEx)>12?constrain(stepEx/STEP_X_FULL_MM,-1.0f,1.0f):0):(stepMode==1?0.3f:0); // P: creep until in range
+  bool okX=hasRef(2)&&front>0;
+  stepEx=okX?front-ref[2]:STEP_UNKNOWN;                                 // + = drive forward
+  // Sideways (+ = strafe left) from exactly the side sensors the capture had, once all see a wall.
+  bool okY=true;
+  if(hasRef(3)&&hasRef(4)) { if(ls>0&&rs>0) stepEy=((ls-rs)-(ref[3]-ref[4]))*0.5f;else okY=false; }
+  else if(hasRef(4)) { if(rs>0) stepEy=ref[4]-rs;else okY=false; }
+  else if(hasRef(3)) { if(ls>0) stepEy=ls-ref[3];else okY=false; }
+  else okY=false;
+  // Starting out, before a side wall is in range: centre on the 45 pair (beams on the side walls).
+  if(!okY&&goCreep&&hasRef(0)&&hasRef(1)&&l45>0&&r45>0) { stepEy=((l45-r45)-(ref[0]-ref[1]))*0.354f;okY=true; }
+  if(!okY) stepEy=STEP_UNKNOWN;
+  if(okX) stepSensorsOkMs=now;
+  goUx=okX?(fabsf(stepEx)>12?constrain(stepEx/STEP_X_FULL_MM,-1.0f,1.0f):0):(goCreep?0.3f:0);
   goUy=okY&&fabsf(stepEy)>8?constrain(stepEy/STEP_Y_FULL_MM,-1.0f,1.0f):0;
-  if(front>0&&front<STEP_FRONT_GUARD_MM&&goUx>0) goUx=0;              // Never drive into a wall.
+  if(front>0&&goUx>0&&(front<30||(okX&&front<ref[2]-20))) goUx=0;    // Never past the target into a wall.
+}
+static bool positionSettled() {
+  bool lateral=hasRef(3)||hasRef(4);
+  return goUx==0&&goUy==0&&fabsf(stepEx)<15&&(!lateral||fabsf(stepEy)<10);
+}
+// Heading probe: average two fresh 45 readings per probe heading, then fit the slopes.
+static void probeNext() {
+  if(goPhase==GO_PLUS) { yawTarget=probeBase-PROBE_DEG;goPhase=GO_MINUS;return; }
+  if(goPhase==GO_MINUS) { yawTarget=probeBase;goPhase=GO_ZERO;return; }
+  float fix=0,weight=0;
+  out.print(F("{\"type\":\"step_probe\",\"slope_mm_per_deg\":["));
+  for(uint8_t b=0;b<2;++b) {
+    bool ok=probeBeam(b)&&probeN[0][b]&&probeN[1][b]&&probeN[2][b];
+    float slope=ok?(probeSum[0][b]/probeN[0][b]-probeSum[1][b]/probeN[1][b])/(2*PROBE_DEG):0;
+    if(b) out.print(',');
+    out.print(slope,1);
+    if(ok&&fabsf(slope)>=PROBE_MIN_SLOPE) { fix+=(ref[b]-probeSum[2][b]/probeN[2][b])/slope;weight+=1; }
+  }
+  probeFix=weight?constrain(fix/weight,-PROBE_MAX_FIX_DEG,PROBE_MAX_FIX_DEG):0;
+  ++probesDone;yawTarget=probeBase+probeFix;
+  out.print(F("],\"fix_deg\":"));out.print(probeFix,2);out.print(F(",\"beams\":"));out.print(int(weight));out.println('}');
+  goPhase=fabsf(probeFix)>2&&probesDone<2?GO_POS:GO_FINAL;  // Re-centre; probe again after a big fix.
 }
 static void stepService() {
   if(stepKind==STEP_IDLE) return;
   uint32_t now=millis();
   if(now-stepCtrlMs<5) return;  // At minimum power the robot still turns ~1 deg per 20 ms.
   stepCtrlMs=now;
-  if(now-stepStartMs>(stepKind==STEP_TURN?10000UL:30000UL)) { stepEnd(false,F("timeout"));return; }
+  if(now-stepStartMs>(stepKind==STEP_TURN?10000UL:40000UL)) { stepEnd(false,F("timeout"));return; }
   if(!gyroRunning||!biasValid) { stepEnd(false,F("gyro_not_ready"));return; }
   float eYaw=yawTarget-yawDeg(),rate=yawRateDps();
   bool coast=eYaw*rate>0&&fabsf(eYaw)<fabsf(rate)*STEP_BRAKE_S;  // Momentum covers the rest.
+  bool headingStill=fabsf(eYaw)<0.6f&&fabsf(rate)<2;
+  float uw=headingStill||coast?0:constrain(eYaw/STEP_YAW_FULL_DEG,-1.0f,1.0f);
+  bool fresh=usSeq!=stepUsSeen;stepUsSeen=usSeq;
   if(stepKind==STEP_TURN) {  // Slows inside 25 deg; done after 400 ms within 0.6 deg and still.
-    bool close=fabsf(eYaw)<0.6f;
-    driveMix(0,0,close||coast?0:constrain(eYaw/STEP_YAW_FULL_DEG,-1.0f,1.0f));
-    if(close&&fabsf(rate)<2) { if(!stepSettledMs) stepSettledMs=now;else if(now-stepSettledMs>=400) stepEnd(true,F("reached")); }
+    driveMix(0,0,uw);
+    if(headingStill) { if(!stepSettledMs) stepSettledMs=now;else if(now-stepSettledMs>=400) stepEnd(true,F("reached")); }
     else stepSettledMs=0;
     return;
   }
-  if(usSeq!=stepUsSeen) { stepUsSeen=usSeq;goUpdate(now); }
-  if(now-stepSensorsOkMs>(stepMode==1?6000UL:1500UL)) { stepEnd(false,F("sensors_lost"));return; }
+  if(fresh) goUpdate(now);
+  if(now-stepSensorsOkMs>(goCreep?6000UL:1500UL)) { stepEnd(false,F("sensors_lost"));return; }
+  if(goPhase==GO_PLUS||goPhase==GO_MINUS||goPhase==GO_ZERO) {  // Turning in place only.
+    driveMix(0,0,uw);
+    if(!headingStill) { stepSettledMs=0;return; }
+    if(!stepSettledMs) { stepSettledMs=now;probeReads=0;return; }
+    if(now-stepSettledMs<200||!fresh) return;   // Let the heading settle; ranges taken after.
+    uint8_t p=goPhase-GO_PLUS;
+    if(!probeReads) for(uint8_t b=0;b<2;++b) probeSum[p][b]=probeN[p][b]=0;
+    for(uint8_t b=0;b<2;++b) if(usLatest[b]>0) { probeSum[p][b]+=usLatest[b];probeN[p][b]+=1; }
+    if(++probeReads>=2) { stepSettledMs=0;probeNext(); }
+    return;
+  }
   driveMix(goUx,goUy,fabsf(eYaw)<0.8f||coast?0:constrain(eYaw/STEP_YAW_FULL_DEG,-1.0f,1.0f));
-  bool settled=goUx==0&&goUy==0&&fabsf(eYaw)<1.5f&&fabsf(stepEx)<15&&fabsf(stepEy)<10&&(stepMode!=1||fabsf(stepEh)<20);
-  if(settled) { if(!stepSettledMs) stepSettledMs=now;else if(now-stepSettledMs>=600) stepEnd(true,F("reached")); }
-  else stepSettledMs=0;
+  if(positionSettled()&&fabsf(eYaw)<1.5f) {
+    if(!stepSettledMs) { stepSettledMs=now;return; }
+    if(now-stepSettledMs<600) return;
+    stepSettledMs=0;
+    if(goPhase==GO_POS&&goProbe&&(probeBeam(0)||probeBeam(1))) { probeBase=yawTarget;yawTarget=probeBase+PROBE_DEG;goPhase=GO_PLUS; }
+    else stepEnd(true,F("reached"));
+  } else stepSettledMs=0;
 }
 static void stepReport(Print& o) {
   o.print(F(",\"step\":{\"kind\":\""));o.print(stepKind==STEP_GO?F("go"):stepKind==STEP_TURN?F("turn"):F("idle"));
-  o.print(F("\",\"mode\":"));o.print(stepMode);o.print(F(",\"square\":"));o.print(squareValid);
+  o.print(F("\",\"phase\":"));o.print(goPhase);o.print(F(",\"ref_heading\":"));o.print(refYawValid);
   o.print(F(",\"yaw_deg\":"));o.print(yawDeg(),1);o.print('}');
 }
 // A scrambled MPU (a write corrupted by noise) reads a wrong ID or impossible gravity, such
@@ -655,21 +701,29 @@ static void command(const char* line,bool usb) {
     out.println(F("{\"type\":\"wmap\",\"ok\":1}"));
     return;
   }
+  if(!strncmp(line,"REF ",4)) {
+    int16_t v[5];
+    if(!parseInts(line+4,v,5)) { out.println(F("{\"error\":\"BAD_REF\"}"));return; }
+    const uint8_t order[5]={2,3,4,0,1};  // front ls rs l45 r45 -> range indices
+    for(uint8_t i=0;i<5;++i) ref[order[i]]=v[i]>0?v[i]:STEP_NO_REF;
+    out.println(F("{\"type\":\"ref\",\"ok\":1}"));
+    return;
+  }
   if(!strncmp(line,"GO ",3)) {
-    int16_t v[7];stopMotors();
-    if(!parseInts(line+3,v,7)||v[0]<1||v[0]>4) { out.println(F("{\"error\":\"BAD_GO_STOPPED\"}"));return; }
-    if(!stepBegin(STEP_GO,v[0],v[4],v[6])) return;
-    refFront=v[1];refLat=v[2];refH45=v[3];refMean45=v[5];
-    float base=squareValid?squareYaw:yawDeg();
-    yawTarget=v[0]==1?yawDeg():v[0]==2?base:squareValid?base+(v[0]==3?90:-90):yawDeg();
+    int16_t v[5];stopMotors();
+    if(!parseInts(line+3,v,5)||v[0]<0||v[0]>1||v[1]<0||v[1]>1||v[2]<0||v[2]>1) { out.println(F("{\"error\":\"BAD_GO_STOPPED\"}"));return; }
+    if(!hasRef(2)&&!v[1]) { out.println(F("{\"error\":\"GO_NEEDS_FRONT_REF\"}"));return; }
+    if(!stepBegin(STEP_GO,v[3],v[4])) return;
+    goCreep=v[1];goProbe=v[2];
+    yawTarget=v[0]&&refYawValid?refYaw:yawDeg();
     stepStarted();
     return;
   }
   if(!strncmp(line,"TURN ",5)) {
     int16_t v[3];stopMotors();
     if(!parseInts(line+5,v,3)||v[0]<-180||v[0]>180) { out.println(F("{\"error\":\"BAD_TURN_STOPPED\"}"));return; }
-    if(!stepBegin(STEP_TURN,0,v[1],v[2])) return;
-    yawTarget=(squareValid?squareYaw:yawDeg())+v[0];
+    if(!stepBegin(STEP_TURN,v[1],v[2])) return;
+    yawTarget=(refYawValid?refYaw:yawDeg())+v[0];
     stepStarted();
     return;
   }

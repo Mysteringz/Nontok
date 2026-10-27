@@ -128,14 +128,14 @@ kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px 
   </section>
   <section class="wide"><h2>Tournament step test</h2>
     <div class="hint">Each Run sends one step that the robot carries out on its own (heading by gyro at 200 Hz, ranges at ~10 Hz).
-      Targets come from the latest capture of each checkpoint. Needs: all four wheels identified, "Wheels lifted / area clear" ticked,
+      Targets are the recorded readings of each checkpoint (calibration panel: P, N, N turned left/right, both boxes). Needs: all four wheels identified, "Wheels lifted / area clear" ticked,
       gyro zeroed. Speed = the drive slider (capped at 150). <kbd>Space</kbd> or STOP cancels.</div>
     <div class="st-grid">
       <div class="st-card" id="st-c0"><b>00 · Locate</b><div class="st-locate" id="st-locate">waiting for data…</div></div>
-      <div class="st-card" id="st-c1"><b>01 · Centre at P</b><span class="hint" id="st-s1">Side sensors equal, left/right 45° equal, front distance = P. Stores the square heading.</span><button id="st-r1">Run 01</button></div>
-      <div class="st-card" id="st-c2"><b>02 · Straight to N</b><span class="hint" id="st-s2">Holds the square heading by gyro and stays centred on the side sensors until the front distance = N.</span><button id="st-r2">Run 02</button></div>
-      <div class="st-card" id="st-c3"><b>03 · Turn by colour</b><span class="hint" id="st-s3">Green → left 90°, red → right 90°, to exactly square ± 90° on the gyro.</span><button id="st-r3">Run 03</button></div>
-      <div class="st-card" id="st-c4"><b>04 · Park</b><span class="hint" id="st-s4">Into the box on the turned side: front distance and back-wall distance (side sensor) = the box capture.</span><button id="st-r4">Run 04</button></div>
+      <div class="st-card" id="st-c1"><b>01 · Centre at P</b><span class="hint" id="st-s1">Matches P's recorded front and side readings, then a ±3° probe fixes the heading from the recorded 45° readings. Stores it as the reference.</span><button id="st-r1">Run 01</button></div>
+      <div class="st-card" id="st-c2"><b>02 · Straight to N</b><span class="hint" id="st-s2">Holds the reference heading straight to N, matches N's readings, probes the heading again.</span><button id="st-r2">Run 02</button></div>
+      <div class="st-card" id="st-c3"><b>03 · Turn by colour</b><span class="hint" id="st-s3">Green → left, red → right: gyro turn of 90°, then it aligns to the recorded "N turned" checkpoint, so the final heading does not rely on the gyro.</span><button id="st-r3">Run 03</button></div>
+      <div class="st-card" id="st-c4"><b>04 · Park</b><span class="hint" id="st-s4">Into the box on the turned side on the aligned heading, until its readings match the box capture.</span><button id="st-r4">Run 04</button></div>
     </div>
     <div class="row"><button class="big-stop" id="st-stop">■ STOP</button>
       <label>Min power <input type="range" id="st-min" min="30" max="120" value="55"> <span id="st-min-v">55</span>/255</label>
@@ -736,43 +736,43 @@ async function calCapture(pose) {
 calLoad();
 
 // ---- Tournament step test ---------------------------------------------------------------------
-// Each Run sends the wheel map, then one on-board step (GO / TURN) whose targets come from the
-// latest capture of its checkpoint; the Mega closes the loop. Capture keys: us_left_mm = left 45°,
-// us_right_mm = right 45°, us_front_mm, us_side_left_mm, us_side_right_mm.
-const ST_STEPS = { 1:{ pose:'p_point', mode:1 }, 2:{ pose:'centre', mode:2 } };
-let stTurn = null, stActive = null;   // stTurn: +90 / -90 chosen by 03, it picks 04's box
-function stRef(pose, key) { const c = calLatest[pose], st = c && c.stats['us_' + key + '_mm']; return st && st.n ? Math.round(st.mean) : null; }
-function stTargets(pose, mode) {
-  const l45 = stRef(pose, 'left'), r45 = stRef(pose, 'right'), front = stRef(pose, 'front');
-  const ls = stRef(pose, 'side_left'), rs = stRef(pose, 'side_right');
-  if (!calLatest[pose]) return { error: `no capture for ${calPoses[pose] || pose} yet` };
-  const lat = mode <= 2 ? (ls != null && rs != null ? ls - rs : null) : mode === 3 ? rs : ls;
-  if (lat == null) return { error: `${calPoses[pose]} capture has no ${mode <= 2 ? 'left+right side' : mode === 3 ? 'right side' : 'left side'} reading` };
-  const both45 = l45 != null && r45 != null;
-  if (front == null && !both45) return { error: `${calPoses[pose]} capture has no front or 45° readings` };
-  return { front: front || 0, lat, h45: both45 ? l45 - r45 : 0, mean45: both45 ? Math.round((l45 + r45) / 2) : 0 };
+// Each Run sends the wheel map, the recorded readings of the target checkpoint (REF) and one
+// on-board step (GO / TURN); the Mega closes the loop. Only steady capture readings are sent
+// (>= 90 % echoes, spread < 25 mm); 9999 tells the robot a reading was not available.
+const ST_NO = 9999, ST_KEYS = ['front', 'side_left', 'side_right', 'left', 'right'];  // REF order
+let stTurn = null, stActive = null, stPhase = null;   // stTurn: +90 / -90 chosen by 03
+const stTurnedPose = () => stTurn > 0 ? 'turned_left' : 'turned_right';
+const stBoxPose = () => stTurn > 0 ? 'left_box' : 'right_box';
+function stRef(pose) {   // [front, ls, rs, l45, r45], ST_NO where the capture was not steady
+  const c = calLatest[pose]; if (!c) return null;
+  return ST_KEYS.map(k => { const st = c.stats['us_' + k + '_mm'];
+    return st && st.n >= 0.9 * c.samples_n && st.sd < 25 ? Math.round(st.mean) : ST_NO; });
 }
-function stErrors(t, mode, us) {   // the same errors the firmware computes; null = not measurable
-  const ok = i => us[i] > 0, [l45, r45, front, ls, rs] = us;
-  const ex = t.front && ok(2) ? front - t.front : t.mean45 && ok(0) && ok(1) ? (l45 + r45) / 2 - t.mean45 : null;
-  const ey = mode <= 2 ? (ok(3) && ok(4) ? ((ls - rs) - t.lat) / 2 : null) : mode === 3 ? (ok(4) ? -(rs - t.lat) : null) : (ok(3) ? ls - t.lat : null);
-  return { ex, ey, eh: ok(0) && ok(1) ? (l45 - r45) - t.h45 : null };
+function stErrors(ref, us, creep) {   // the same errors the firmware computes; null = not measurable
+  const [front, ls, rs] = ref, ok = i => us[i] > 0, has = v => v !== ST_NO;
+  const ex = has(front) && ok(2) ? us[2] - front : null;
+  let ey = null;
+  if (has(ls) && has(rs)) { if (ok(3) && ok(4)) ey = ((us[3] - us[4]) - (ls - rs)) / 2; }
+  else if (has(rs)) { if (ok(4)) ey = rs - us[4]; }
+  else if (has(ls)) { if (ok(3)) ey = us[3] - ls; }
+  if (ey == null && creep && has(ref[3]) && has(ref[4]) && ok(0) && ok(1)) ey = ((us[0] - us[1]) - (ref[3] - ref[4])) * 0.354;
+  return { ex, ey };
 }
 const stMm = v => v == null ? '—' : `${v > 0 ? '+' : ''}${Math.round(v)} mm`;
 function stLocate(s) {
   const us = [0, 1, 2, 3, 4].map(i => s.ultrasonic_mm[i] ?? -1), names = ['L45', 'R45', 'front', 'L side', 'R side'];
   const lines = [`sees: ${names.map((n, i) => `${n} ${us[i] > 0 ? us[i] : '✗'}`).join(' · ')}`];
-  const rows = [['P', 'p_point', 1], ['N', 'centre', 2]];
-  if (stTurn) rows.push([stTurn > 0 ? 'left box' : 'right box', stTurn > 0 ? 'left_box' : 'right_box', stTurn > 0 ? 3 : 4]);
-  for (const [label, pose, mode] of rows) {
-    const t = stTargets(pose, mode);
-    if (t.error) { lines.push(`to ${label}: ${t.error}`); continue; }
-    const e = stErrors(t, mode, us);
-    lines.push(`to ${label}: forward ${stMm(e.ex)} · sideways ${stMm(e.ey)} (left +)` + (mode <= 2 ? ` · 45° asym ${stMm(e.eh)}` : ''));
+  const rows = [['P', 'p_point', true], ['N', 'centre', false]];
+  if (stTurn) rows.push([stTurn > 0 ? 'turned left' : 'turned right', stTurnedPose(), false], [stTurn > 0 ? 'left box' : 'right box', stBoxPose(), false]);
+  for (const [label, pose, creep] of rows) {
+    const ref = stRef(pose);
+    if (!ref) { lines.push(`to ${label}: no capture yet`); continue; }
+    const e = stErrors(ref, us, creep);
+    lines.push(`to ${label}: forward ${stMm(e.ex)} · sideways ${stMm(e.ey)} (left +)`);
   }
   const step = s.step || (latest && latest.step) || {}, g = s.gyro || {};
   lines.push(`colour ${colour ? `${colour.name} ${Math.round(100 * colour.confidence)}%` : '—'} · yaw ${step.yaw_deg ?? '—'}° · ` +
-    `square heading ${step.square ? 'stored' : 'not yet (run 01)'} · gyro ${g.bias_valid === 0 ? 'NOT ZEROED' : 'ok'}`);
+    `reference heading ${step.ref_heading ? 'stored' : 'not yet (run 01)'} · gyro ${g.bias_valid === 0 ? 'NOT ZEROED' : 'ok'}`);
   $('st-locate').innerHTML = lines.join('<br>');
 }
 function stCard(n, cls, text) {
@@ -787,45 +787,59 @@ function stReady() {
   if (!g || g.bias_valid === 0) return 'The gyro is not zeroed yet: keep the robot still for 2 s.';
   return null;
 }
-function stRun(n, stepCommand) {
+const stPower = () => { const max = Math.min(Number($('speed').value), 150); return [max, Math.min(Number($('st-min').value), max)]; };
+function stSend(n, phase, commands, text) {   // commands run in order; the last one starts the step
   if ($('drive-on').checked) { $('drive-on').checked = false; held.clear(); clearInterval(driveTimer); driveTimer = null; }
-  const wmap = 'WMAP ' + ['FL', 'FR', 'RL', 'RR'].map(p => `${motorMap[p].motor} ${motorMap[p].sign}`).join(' ');
-  stActive = n; stCard(n, 'running', `running… (${stepCommand})`); $('st-msg').textContent = '';
-  lastSent = stepCommand;   // so the next Space / STOP is always sent
-  command(wmap).then(() => command(stepCommand));
-  mark(`step ${String(n).padStart(2, '0')} run: ${stepCommand}`);
+  stActive = n; stPhase = phase; stCard(n, 'running', text); $('st-msg').textContent = '';
+  lastSent = commands.at(-1);   // so the next Space / STOP is always sent
+  commands.reduce((p, c) => p.then(() => command(c)), Promise.resolve());
+  mark(`step ${String(n).padStart(2, '0')} ${phase}: ${commands.join(' | ')}`);
 }
-function stPower() { const max = Math.min(Number($('speed').value), 150); return [max, Math.min(Number($('st-min').value), max)]; }
-function stGo(n) {
-  const why = stReady(); if (why) { $('st-msg').textContent = why; return; }
-  const { pose, mode } = ST_STEPS[n] || { pose: stTurn > 0 ? 'left_box' : 'right_box', mode: stTurn > 0 ? 3 : 4 };
-  const t = stTargets(pose, mode); if (t.error) { $('st-msg').textContent = `Step ${n}: ${t.error}. Record it in the calibration panel.`; return; }
+function stGo(n, pose, base, creep, phase, text) {
+  const ref = stRef(pose);
+  if (!ref) return `no capture for ${calPoses[pose]} yet: record it in the calibration panel`;
+  if (ref[0] === ST_NO && !creep) return `the ${calPoses[pose]} capture has no steady front reading`;
   const [max, min] = stPower();
-  stRun(n, `GO ${mode} ${t.front} ${t.lat} ${t.h45} ${max} ${t.mean45} ${min}`);
+  const wmap = 'WMAP ' + ['FL', 'FR', 'RL', 'RR'].map(p => `${motorMap[p].motor} ${motorMap[p].sign}`).join(' ');
+  stSend(n, phase, [wmap, `REF ${ref.join(' ')}`, `GO ${base} ${creep ? 1 : 0} 1 ${max} ${min}`], text);
+  return null;
 }
-$('st-r1').onclick = () => stGo(1);
-$('st-r2').onclick = () => stGo(2);
-$('st-r3').onclick = () => {
-  const why = stReady(); if (why) { $('st-msg').textContent = why; return; }
-  if (!colour || colour.confidence < 0.5) { $('st-msg').textContent = 'Colour unclear: the robot must be over the red or green paper (confidence ≥ 50%).'; return; }
+function stRun(n, fn) { const why = stReady() || fn(); if (why) $('st-msg').textContent = `Step ${String(n).padStart(2, '0')}: ${why}.`; }
+$('st-r1').onclick = () => stRun(1, () => stGo(1, 'p_point', 0, true, 'go', 'running… centring on P, then probing the heading'));
+$('st-r2').onclick = () => stRun(2, () => stGo(2, 'centre', 1, false, 'go', 'running… straight to N on the reference heading'));
+$('st-r3').onclick = () => stRun(3, () => {
+  if (!colour || colour.confidence < 0.5) return 'colour unclear: the robot must be over the red or green paper (confidence ≥ 50%)';
   stTurn = colour.name === 'GREEN' ? 90 : -90;
   const [max, min] = stPower();
-  stRun(3, `TURN ${stTurn} ${max} ${min}`);
-  $('st-s3').textContent = `${colour.name} → turning ${stTurn > 0 ? 'left' : 'right'} 90°…`;
-};
-$('st-r4').onclick = () => { if (!stTurn) { $('st-msg').textContent = 'Run 03 first: the turn decides which box.'; return; } stGo(4); };
-$('st-stop').onclick = () => { stopDrive(true); $('st-msg').textContent = 'STOP sent.'; };
+  const wmap = 'WMAP ' + ['FL', 'FR', 'RL', 'RR'].map(p => `${motorMap[p].motor} ${motorMap[p].sign}`).join(' ');
+  stSend(3, 'turn', [wmap, `TURN ${stTurn} ${max} ${min}`], `${colour.name} → gyro turn ${stTurn > 0 ? 'left' : 'right'} 90°…`);
+  return null;
+});
+$('st-r4').onclick = () => stRun(4, () => stTurn ? stGo(4, stBoxPose(), 1, false, 'go', 'running… parking on the aligned heading')
+                                                  : 'run 03 first: the turn decides which box');
+$('st-stop').onclick = () => { stopDrive(true); stActive = null; $('st-msg').textContent = 'STOP sent.'; };
 $('st-min').oninput = () => $('st-min-v').textContent = $('st-min').value;
+let stProbes = [];
 function stEvent(line) {
-  if (line.error && /STEP|BAD_GO|BAD_TURN|BAD_WMAP/.test(line.error) && stActive) {
+  if (!stActive) return;
+  if (line.error && /STEP|BAD_GO|BAD_TURN|BAD_WMAP|BAD_REF|GO_NEEDS/.test(line.error)) {
     stCard(stActive, 'aborted', `refused by the robot: ${line.error}`); stActive = null; return;
   }
-  if (line.type !== 'step_end' || !stActive) return;
-  const n = stActive; stActive = null;
-  const ok = line.result === 'reached', why = line.reason.replaceAll('_', ' ');
-  const err = line.kind === 'turn' ? `heading error ${line.yaw_err_deg}°, yaw ${line.yaw_deg}°`
-    : `forward ${line.ex_mm} mm, sideways ${line.ey_mm} mm` + (line.mode === 1 ? `, 45° asym ${line.eh45_mm} mm` : '') + `, heading error ${line.yaw_err_deg}°`;
-  stCard(n, ok ? 'reached' : 'aborted', `${ok ? '✓ reached' : `✗ aborted (${why})`}: ${err}` + (n === 1 && ok ? ' · square heading stored' : ''));
+  if (line.type === 'step_start') stProbes = [];
+  if (line.type === 'step_probe') { stProbes.push(line.fix_deg); $('st-s' + stActive).textContent = `heading probe: correction ${line.fix_deg}° (beams used ${line.beams})…`; }
+  if (line.type !== 'step_end') return;
+  const n = stActive, ok = line.result === 'reached';
+  if (n === 3 && stPhase === 'turn' && ok) {   // gyro turn done: finish on the turned checkpoint's readings
+    const gyroOnly = `gyro turn reached (heading error ${line.yaw_err_deg}°)`;
+    const why = stGo(3, stTurnedPose(), 0, false, 'align', `${gyroOnly}; aligning to ${calPoses[stTurnedPose()]}…`);
+    if (why) { stActive = null; stCard(3, 'reached', `${gyroOnly}, gyro only: ${why}`); }
+    return;
+  }
+  stActive = null;
+  const probe = stProbes.length ? ` · heading probe fixes ${stProbes.map(f => `${f}°`).join(', ')}` : '';
+  const err = line.kind === 'turn' ? `heading error ${line.yaw_err_deg}°` : `forward ${line.ex_mm} mm, sideways ${line.ey_mm} mm${probe}`;
+  stCard(n, ok ? 'reached' : 'aborted', `${ok ? '✓ reached' : `✗ aborted (${line.reason.replaceAll('_', ' ')})`}: ${err}` +
+    (ok && line.kind === 'go' ? ' · heading stored as reference' : ''));
 }
 
 poll();

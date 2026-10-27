@@ -25,14 +25,16 @@ COMMANDS = {"STATUS", "PROBE", "GYROINIT", "GYROZERO", "HEADING0", "STOP", "HELP
 # Motion: one-motor identify spin, raw watchdogged drive (firmware caps |v| at 200)
 # and the on-board 180-degree turn test.
 MOTION = re.compile(r"SPIN [1-4] [+-]|(MOT|TURNTEST)( -?\d{1,3}){4}"
-                    r"|WMAP( [1-4] -?1){4}|GO [1-4]( -?\d{1,4}){6}|TURN -?\d{1,3}( \d{1,3}){2}")
+                    r"|WMAP( [1-4] -?1){4}|REF( \d{1,4}){5}|GO( [01]){3}( \d{1,3}){2}|TURN -?\d{1,3}( \d{1,3}){2}")
 PAGE = ROOT / "tools" / "probe_dashboard.html"
 # Competition calibration: 5 s of stationary readings per pose, appended one capture per line.
 CAPTURES = ROOT / ".local-data" / "calibration" / "pose-captures.jsonl"
-# Placement order for the tournament steps: P, then N on the colour paper, then the boxes in
-# their final parking orientation (robot facing the side wall it turned toward).
+# Placement order for the tournament steps: P facing the back wall, N on the colour paper, then
+# N turned exactly 90 deg each way and the boxes in their final parking pose (facing the side
+# wall the robot turned toward). Turned checkpoints let step 03 finish on recorded readings.
 POSES = {"p_point": "Checkpoint P (centre of semicircle)", "centre": "Checkpoint N (colour plate)",
-         "right_box": "Right parking box", "left_box": "Left parking box"}
+         "turned_left": "N turned left (faces left wall)", "left_box": "Left parking box",
+         "turned_right": "N turned right (faces right wall)", "right_box": "Right parking box"}
 CAPTURE_SECONDS = 5
 LIGHT_PINS = ("A0", "A7", "A2", "A6")  # Firmware adc[] order; physically left to right A0, A2, A7, A6.
 
