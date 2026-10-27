@@ -15,6 +15,7 @@ void sensorsBegin() {}
 void sensorsUpdate() {}
 core::Sensors sensorsRead() { return mockSensors; }
 void sensorsProbe(Stream& s) { s.println("# PROBE END"); }
+const char* sensorsGyroState() { return "GYRO_ZEROED"; }
 void displayBegin() {}
 void displayUpdate(const core::Controller&,const core::Sensors&) {}
 #include "../firmware/core_robot_mega/src/main.cpp"

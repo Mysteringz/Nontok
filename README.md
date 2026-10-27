@@ -78,6 +78,8 @@ Repeatable commands are listed under [Verification](#verification).
 
 **23 October colour-driver update:** `COLOR_DRIVER=2` now uses the reported D32/PC5 input and D25/D28/D29/D30 controls, retaining the 10 ms-normalized telemetry units. Instruction-level tests cover 744 square-wave cases, balanced nine-cycle input spacing and bounded execution, alongside missing/stale-window rejection and complete-frame recovery. Host tests also compare all eight course button motor patterns, literal backslash+n framing and exact colour pin constants. The `mega2560_oled` profile now targets the working 128×32 display. Hardware waveform, serial/loop timing and colour accuracy remain unverified. Re-capture red/green calibration after wiring and commissioning. Sensor/motor access gates remain off by default.
 
+**27 October update:** the Mega board was replaced. The repeated "blackouts" while driving were firmware reboots: the I²C library's timeout was compiled out, so motor noise on the gyro bus hung the Mega until the watchdog reset it. Both firmwares now set it, recover a stuck bus, health-check and reset the gyro, and take its zero only from a still robot (the competition firmware keeps `imuValid` false until then). Confirmed on the robot: LDRs A0/A2/A7/A6 left → right with higher = brighter, gyro `GYRO_SIGN = -1` and about 1 % scale accuracy, Bluetooth module renamed **DIVA**. A 54 s motor stress test then ran with no reboot. The console's **Tournament step test** runs the mission one step at a time on the probe firmware: centre at checkpoint P, go straight to N, turn by colour, then park. Each step is closed-loop on the Mega, with targets from the calibration captures. It has been checked in simulation (`tools/step_sim.py`) but not yet on the field. The installed firmware is the hardware probe. Its console (`./tools/start_console.sh`) records calibration poses to `.local-data/calibration/pose-captures.jsonl`. Details: [docs/hardware.md](docs/hardware.md#confirmed-sensors--27-october-2026).
+
 ## B. Self-proposed application: Lab Assistant
 
 The user says "find the multimeter". The robot undocks, drives to storage, finds the item with YOLO, tells the user, carries it to the workstation on its tray, takes items back to storage, and returns to its wireless charging dock. See the proposal and [docs/state_machine.md](docs/state_machine.md) (S0–S9, T1–T16).
@@ -132,11 +134,13 @@ The Mega runs **one sketch at a time**. Flash `core_robot_mega` for the parking 
 | PWM 12, 8, 9, 5; DIR1/DIR2 34/35, 37/36, 43/42, A4/A5 (legacy 26/27) | 4 mecanum motors (MOEBIUS TB6612 shield) | A (B copies) | Manufacturer map; revision/wheel signs need physical verification |
 | 0 / 1 (Serial0); 14 / 15 (Serial3) | USB logging; Bluetooth TX3/RX3 | both | Working sketch confirms Serial3 at 9600; USB 115200 |
 | 22/23, 24/25, 26/27 | Ultrasonic front, left, right (trig/echo) | B | TODO wire |
-| 20 / 21 (I2C) | MPU6050 and optional core OLED | A / B | Confirm addresses/models and wiring |
+| 20 / 21 (I2C), 33 (INT) | MPU6050 0x68 and optional core OLED 0x3c | A / B | Identified; CCW yaw = −Z (`GYRO_SIGN -1`), 27 Oct |
 | 10 | Camera tilt servo | B | TODO: match a shield servo header |
 | A0 | Wireless charging receiver voltage (through a divider) | B | TODO wire |
-| 40/41 (PG1/PG0), 48/47 (PL1/PL2) | Core left/right ultrasonic TRIG/ECHO | A | User-reported 23 Oct; right ECHO stays D47 |
-| A6/A3, A2/A1 | Light sensors A/B, each left/right analogue outputs | A | User confirmed A4→A6 move and power; four-channel decoding pending |
+| 48/47 (PL1/PL2), 40/41 (PG1/PG0) | Core left/right ultrasonic TRIG/ECHO | A | Plugs swapped 23 Oct: left D48/D47, right D40/D41 |
+| 22 / 24 (PA0 / PA2) | Core front ultrasonic TRIG / ECHO | A | Wired 27 Oct; collides with B's 22–25 claim; probe reads it, mission does not yet |
+| 10 / 11 (PB4 / PB5), 6 / 7 (PH3 / PH4) | Core left-side / right-side ultrasonic TRIG / ECHO | A | Wired 27 Oct on the SERVO row (VCC from 5 V, not the servo rail); D10 collides with B's tilt-servo plan |
+| A0, A2, A7, A6 | Four LDRs, left → right; higher ADC = brighter | A | Confirmed 27 Oct; A0 collides with B's charger claim; four-channel decoding pending |
 | 25 / 28 / 29 / 30 / 32 (S1 / S0 / S3 / S2 / OUT) | Core frequency colour interface | A | User-reported ports; D32/PC5 sampled directly; no timer ownership |
 
 **Sensor placement must work for both parts.** The core now follows the user's two front ±45° ultrasonic layout and front underside colour sensor. Its former three-sensor assumption is removed. The proposed application still has its own front/left/right assumptions; reconcile them before sharing hardware.
@@ -194,7 +198,10 @@ arduino-cli compile --fqbn arduino:avr:mega --build-path /tmp/nontok-assistant-b
 Add a line here, and remove it once the other part has dealt with it.
 
 - **B → A:** Once the motor pins and signs are confirmed on the real board, update `docs/hardware.md`. B will copy them into `firmware/lab_assistant_mega/config.h`.
-- **A → B:** Working course code confirms M4 A4/A5, forward signs {-1,+1,-1,+1}, Bluetooth Serial3/9600 and OLED SSD1306 128×32. Core target wiring: ultrasound D40/D41,D48/D47; light A6/A3,A2/A1 (physical A4→A6 move confirmed); colour S1/S0/S3/S2/OUT D25/D28/D29/D30/D32. No gyro is connected yet. The old servo attachments on D47/D48 conflict with ultrasonics and must be reconciled before sharing wiring. See `docs/working_car_reference.md`.
+- **A → B:** Working course code confirms M4 A4/A5, forward signs {-1,+1,-1,+1}, Bluetooth Serial3/9600 and OLED SSD1306 128×32. Core wiring: ultrasound left D48/D47, right D40/D41; LDRs A0/A2/A7/A6 left → right (27 Oct); colour S1/S0/S3/S2/OUT D25/D28/D29/D30/D32. MPU6050 at 0x68 is installed (INT D33), CCW yaw = −Z. The old servo attachments on D47/D48 conflict with ultrasonics and must be reconciled before sharing wiring. See `docs/working_car_reference.md`.
+- **A → B:** A0 is now LDR 1 (confirmed 27 Oct), which collides with B's charger-voltage claim on A0. B, please pick another analogue input.
+- **A → B:** D10/D11 (PB4/PB5) now carry the left-side ultrasonic (27 Oct). B's `TILT_SERVO_PIN 10` must move to another SERVO-row pin, e.g. PB7 (D13) or PL3-PL5 (D46/D45/D44).
+- **A → B:** D22 (TRIG) and D24 (ECHO) are now physically wired to a front ultrasonic (27 Oct), and D25 is colour S1. B's planned ultrasonics on 22/23, 24/25, 26/27 must move or share this front sensor.
 - **A → B:** Core motor map now follows the MOEBIUS vendor schematic and lives under `include/config.h`; compare signs/revision before updating the proposed sketch.
 - **Physical commissioning:** Verify shield revision, remaining sensor models and mounting. IMG_3849 establishes the colour module header, but not its Mega cable endpoints or exact chip marking.
 

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Car Controller</title>
+<style>
+:root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --mute:#667085; --line:#e4e7ec; --bad:#c0362c; --ok:#1f7a4d; --hot:#d9480f; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#111418; --card:#1a1e24; --ink:#e7eaee;
+  --mute:#98a2b3; --line:#2b313a; --bad:#ff6b5e; --ok:#4cc38a; --hot:#ff922b; } }
+:root[data-theme="dark"] { --bg:#111418; --card:#1a1e24; --ink:#e7eaee; --mute:#98a2b3; --line:#2b313a; --bad:#ff6b5e; --ok:#4cc38a; --hot:#ff922b; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.4 -apple-system,system-ui,sans-serif; }
+header { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); }
+h1 { font-size:16px; margin:0; }
+h2 { font-size:13px; margin:0 0 8px; color:var(--mute); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+main { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr)); gap:12px; padding:12px 16px; }
+section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; min-width:0; }
+button, select { font:inherit; padding:5px 10px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--ink); }
+button { cursor:pointer; } button:hover { border-color:var(--mute); }
+.badge { font-size:12px; padding:2px 8px; border-radius:99px; border:1px solid var(--line); color:var(--mute); }
+.badge.ok { color:var(--ok); border-color:var(--ok); } .badge.bad { color:var(--bad); border-color:var(--bad); }
+.row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:6px 0; }
+.pad { display:grid; grid-template-columns:repeat(3,84px); grid-template-rows:repeat(3,64px); gap:8px; justify-content:center; margin:8px 0; }
+.pad button { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:2px; touch-action:none; user-select:none; }
+.pad button b { font-size:20px; } .pad button span { font-size:11px; color:var(--mute); }
+.pad button.held { border-color:var(--hot); color:var(--hot); }
+.pad .stop { background:var(--bad); border-color:var(--bad); color:#fff; } .pad .stop span { color:#fff; }
+.hint { font-size:12px; color:var(--mute); }
+kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px ui-monospace,monospace; }
+pre { margin:0; font:12px/1.4 ui-monospace,monospace; white-space:pre-wrap; word-break:break-all; height:300px; overflow:auto; color:var(--mute); }
+.val b { font-size:18px; display:block; font-variant-numeric:tabular-nums; } .val span { font-size:12px; color:var(--mute); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Car controller (professor's sketch)</h1>
+  <span class="row" style="margin:0">Bluetooth <select id="bt-port"></select><button data-connect="bt">Connect</button></span>
+  <span class="badge" id="bt-badge">—</span>
+  <span class="row" style="margin:0">USB monitor <select id="usb-port"></select><button data-connect="usb">Connect</button></span>
+  <span class="badge" id="usb-badge">—</span>
+</header>
+<main>
+  <section><h2>Drive (hold)</h2>
+    <div class="pad" id="pad"></div>
+    <div class="row"><button data-once="L" title="Motor_PWM = 1500">Speed L</button><button data-once="M" title="Motor_PWM = 500">Speed M</button>
+      <span id="held" class="hint">idle</span></div>
+    <div class="hint">Keys: <kbd>W</kbd> A · <kbd>S</kbd> E · <kbd>A</kbd> H · <kbd>D</kbd> B · <kbd>Q</kbd> C · <kbd>E</kbd> G · <kbd>Space</kbd> stop.
+      Hold to keep moving: the letter repeats every 100 ms and Z is sent on release. The sketch also stops by itself ~1.6 s after the last letter.
+      Labels are the sketch's function names; which way each one moves depends on the wheel wiring.</div>
+  </section>
+  <section><h2>Link check</h2>
+    <div class="row" style="gap:20px">
+      <div class="val"><b id="sent">0</b><span>letters sent</span></div>
+      <div class="val"><b id="bt-rx">—</b><span>last heard over Bluetooth</span></div>
+      <div class="val"><b id="echo">—</b><span>Mega echoed a letter (USB)</span></div>
+    </div>
+    <div class="hint" id="verdict">Connect Bluetooth, and USB to see what the Mega actually receives.</div>
+  </section>
+  <section><h2>Received</h2><pre id="log"></pre></section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const PAD = [['H','LEFT_2'],['A','ADVANCE'],['B','RIGHT_2'],['G','rotate_2'],['Z','STOP'],['C','rotate_1'],['F','LEFT_3'],['E','BACK'],['D','RIGHT_3']];
+const KEYS = { w:'A', s:'E', a:'H', d:'B', q:'C', e:'G' };
+const post = (path, body) => fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+let sent = 0, held = null, timer = null, lastSendAt = 0, lastEchoAt = 0;
+function send(c) { sent++; lastSendAt = Date.now(); $('sent').textContent = sent; post('/api/send', { c }); }
+function press(c) {
+  if (c === 'Z') return release(true);
+  if (held === c) return;
+  held = c; send(c); clearInterval(timer); timer = setInterval(() => send(c), 100);
+  document.querySelectorAll('#pad button').forEach(b => b.classList.toggle('held', b.dataset.c === c));
+  $('held').textContent = 'sending ' + c;
+}
+function release(force) {
+  if (!held && !force) return;
+  clearInterval(timer); timer = null; held = null; send('Z');
+  document.querySelectorAll('#pad button').forEach(b => b.classList.remove('held'));
+  $('held').textContent = 'stopped (Z)';
+}
+$('pad').innerHTML = PAD.map(([c, name]) => `<button data-c="${c}" class="${c === 'Z' ? 'stop' : ''}"><b>${c}</b><span>${name}</span></button>`).join('');
+document.querySelectorAll('#pad button').forEach(b => {
+  b.onpointerdown = e => { e.preventDefault(); b.setPointerCapture(e.pointerId); press(b.dataset.c); };
+  b.onpointerup = b.onpointercancel = () => release();
+});
+document.querySelectorAll('[data-once]').forEach(b => b.onclick = () => send(b.dataset.once));
+addEventListener('keydown', e => {
+  if (e.key === ' ') { e.preventDefault(); return release(true); }
+  const c = KEYS[e.key.toLowerCase()]; if (c && !e.repeat) { e.preventDefault(); press(c); }
+});
+addEventListener('keyup', e => { if (KEYS[e.key.toLowerCase()] === held) release(); });
+addEventListener('blur', () => release());
+document.addEventListener('visibilitychange', () => { if (document.hidden) release(); });
+
+const portsShown = { bt:'', usb:'' };
+function fillPorts(role, ports, current) {
+  const sel = $(role + '-port'), key = JSON.stringify(ports) + current;
+  if (portsShown[role] === key) return; portsShown[role] = key;
+  sel.innerHTML = '<option value="">none</option>' + ports.map(p => `<option value="${p.device}">${p.device.replace('/dev/cu.', '')} (${p.kind})</option>`).join('');
+  sel.value = current || '';
+}
+document.querySelectorAll('[data-connect]').forEach(b => b.onclick = () => post('/api/connect', { role:b.dataset.connect, port:$(b.dataset.connect + '-port').value }));
+function badge(id, link) {
+  const ok = link.status.startsWith('receiving') && link.rx_age != null && link.rx_age < 3;
+  $(id).textContent = link.status + (link.rx_age != null ? ` · ${link.rx_age} s` : '');
+  $(id).className = 'badge ' + (ok ? 'ok' : link.port ? 'bad' : '');
+}
+let after = 0;
+async function poll() {
+  try {
+    const r = await (await fetch('/api/state?after=' + after)).json(); after = r.seq;
+    fillPorts('bt', r.ports, r.links.bt.port); fillPorts('usb', r.ports, r.links.usb.port);
+    badge('bt-badge', r.links.bt); badge('usb-badge', r.links.usb);
+    for (const l of r.lines) {
+      const t = new Date(l.t * 1000).toLocaleTimeString();
+      $('log').textContent = `${t} ${l.src.toUpperCase()}  ${l.text}\n` + $('log').textContent.slice(0, 20000);
+      // The sketch prints each Bluetooth letter it receives on USB (plus "Run!" etc.).
+      if (l.src === 'usb' && /[A-HZzdbLM]/.test(l.text) && !/^Start$|^\d+$/.test(l.text)) lastEchoAt = Date.now();
+    }
+    const bt = r.links.bt.rx_age; $('bt-rx').textContent = bt == null ? 'never' : bt + ' s ago';
+    $('echo').textContent = lastEchoAt ? ((Date.now() - lastEchoAt) / 1000).toFixed(1) + ' s ago' : 'never';
+    const recent = Date.now() - lastSendAt < 3000, echoed = lastEchoAt && Date.now() - lastEchoAt < 3000;
+    $('verdict').textContent = !r.links.bt.port ? 'No Bluetooth port selected.' :
+      !recent ? 'Press a drive button to test the link.' :
+      echoed ? 'Mega is receiving your letters over Bluetooth.' :
+      r.links.usb.port ? 'Letters sent, but the Mega has not echoed any on USB: Bluetooth → Mega path is not delivering.' :
+      'Letters sent. Connect USB to confirm the Mega receives them.';
+  } catch { $('bt-badge').textContent = 'controller server stopped'; $('bt-badge').className = 'badge bad'; }
+  setTimeout(poll, 250);
+}
+poll();
+</script>
+</body>
+</html>

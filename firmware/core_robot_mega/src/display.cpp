@@ -16,9 +16,7 @@ static bool available = false;
 void displayBegin() {
 #if OLED_DRIVER
   Wire.begin();
-#if defined(WIRE_HAS_TIMEOUT)
-  Wire.setWireTimeout(2500, true);
-#endif
+  Wire.setWireTimeout(25000, true);  // Unconditional: WIRE_HAS_TIMEOUT is never defined here.
   Wire.beginTransmission(OLED_ADDRESS);
   if (Wire.endTransmission() != 0) return;
   oled.setI2CAddress(OLED_ADDRESS << 1); oled.begin();

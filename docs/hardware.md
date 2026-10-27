@@ -107,7 +107,35 @@ does not guarantee an 80 mm displacement. Likewise rotation rates do not promise
 accurate turn angles. The parking routine separately uses actual gyro and range
 feedback; its sensor wiring and geometry must be confirmed before enabling it.
 
+## Confirmed sensors — 27 October 2026
+
+Measured on the robot with the hardware-probe console. These rows supersede the 23 October light and gyro entries below.
+
+| Signal | Mega pin / value | Evidence |
+| --- | --- | --- |
+| LDR 1 (leftmost) | A0 | Probe reads all four live; A1 header pin broken, A3 unused, A4/A5 are M4 |
+| LDR 2 | A2 | User swapped positions 2 and 3 on 27 Oct |
+| LDR 3 | A7 | As above |
+| LDR 4 (rightmost) | A6 | |
+| LDR polarity | **higher ADC = brighter** | User flashlight/hand test, 27 Oct; reverses the 23 Oct note |
+| Left ultrasonic TRIG / ECHO | D48 / D47 (PL1 / PL2) | Plugs swapped 23 Oct after a left-cable fault |
+| Right ultrasonic TRIG / ECHO | D40 / D41 (PG1 / PG0) | As above |
+| Front ultrasonic TRIG / ECHO | D22 / D24 (PA0 / PA2) | Added by the user 27 Oct; the probe reads it as the third range (left, right, front). Not yet used by the competition mission |
+| Left-side ultrasonic (faces +90°) TRIG / ECHO | D10 / D11 (PB4 / PB5, SERVO row) | Wired by the user 27 Oct; probe range index 3 |
+| Right-side ultrasonic (faces −90°) TRIG / ECHO | D6 / D7 (PH3 / PH4, SERVO row) | Wired by the user 27 Oct; probe range index 4 |
+| Gyro | MPU6050 at 0x68, shield IMU header SDA D20 / SCL D21, INT D33 | WHO_AM_I 0x68; data-ready INT toggles |
+| Gyro yaw sign | CCW (left) turn = raw Z negative, so `GYRO_SIGN = -1` | Hand test: 4 × 90° left read raw Z −357.4° |
+| Gyro sampling | 200 Hz into the chip FIFO, ~44 Hz low-pass, ±500 °/s; every sample is integrated | Both firmwares since 27 Oct; the competition firmware previously integrated one polled reading per loop |
+| Gyro accuracy | Reads ~0.9 % short (best fit 0.991); stationary drift ~0.003 °/s; back to 0.0° after 720° of turning | Same test, ±500 °/s probe range, after the fixes below |
+| Bluetooth module | HC-06-style, firmware `V2.3-20231103`, Serial3 D14/D15 at 9600, name **DIVA** | AT replies over `BTAT`; renamed from "Feetwasher" 27 Oct, PIN unchanged |
+
+**Ultrasonic power:** the SERVO header's red row carries battery voltage (labelled 6–8.4 V), not 5 V. Take the side sensors' VCC from a 5 V pin, such as the red row of the GPIO header; only their signal wires go on the SERVO row. The probe pings all five in the order front-left, right side, front, left side, front-right, so consecutive pings face 90–135° apart. It leaves 15 ms between pings and waits at most 18 ms (about 3 m) for each echo.
+
+**I²C reliability (fixed 27 Oct).** The PlatformIO Wire library (framework-arduino-avr 5.2.0) has no timeout unless asked, and never defines `WIRE_HAS_TIMEOUT`, so the firmware's `#if`-guarded `setWireTimeout` compiled to nothing. Motor noise on SDA/SCL then left a transfer waiting forever; the watchdog rebooted the board within seconds of driving (more than 30 reboots in the 27 Oct logs). Both firmwares now set a 25 ms timeout unconditionally; the limit covers a whole transfer, and a 30-byte read takes ~2.8 ms at 100 kHz. After a timeout they clock the bus free and send STOP. The MPU keeps power through a Mega reset and was seen scrambled (accel −32768 on every axis), so the gyro is now also health-checked (WHO_AM_I and 0.5–1.6 g gravity, every 250 ms) and fully reset when implausible. Its bias is taken only from a still robot, automatically once it is still. Telemetry counts I²C timeouts and gyro resets.
+
 ## User-reported wiring update — 23 October 2026
+
+Light and gyro rows in this section are superseded by [Confirmed sensors — 27 October 2026](#confirmed-sensors--27-october-2026).
 
 The user supplied the following installed connections and confirmed that the light pin numbers are **analogue inputs**:
 
@@ -127,7 +155,7 @@ Port-to-Arduino numbers follow the [official Mega pinout](https://docs.arduino.c
 
 **Current colour wiring:** the user specified S1=PA3/D25, S0=PA6/D28, S3=PA7/D29, S2=PC7/D30 and OUT=PC5/D32. The sampler now reads PINC bit 5. Right ultrasonic ECHO stays D47, and no timer is reconfigured. This supersedes the earlier D19/D44/D45 proposal. The competition driver sets S0/S1 to 20% scaling. The approved diagnostic has captured passive pulse activity on D32 while leaving the colour controls untouched; RGB classification is not calibrated or verified.
 
-**M4 source confirmed:** the working sketch uses A4/A5. The user confirmed moving the conflicting light output to A6; the core and diagnostic target A6/A3/A2/A1. Raised-wheel checks remain required before enabling motors. The compile guard still rejects enabling updated M4 with light A on A4. The user confirmed no OLED reset wire, resolving the working sketch's unused `OLED_RESET=28` assignment; core OLED code never toggles that pin.
+**M4 source confirmed:** the working sketch uses A4/A5. The user confirmed moving the conflicting light output to A6; the LDRs have since been confirmed on A0/A2/A7/A6 (27 Oct, above). Raised-wheel checks remain required before enabling motors. The compile guard still rejects enabling updated M4 with light A on A4. The user confirmed no OLED reset wire, resolving the working sketch's unused `OLED_RESET=28` assignment; core OLED code never toggles that pin.
 
 The four analogue signals are sensor-side channels, not four identified beacons or a proven mapping to the current three-beacon strength model. Keep `LIGHT_DRIVER=0` until their response and beacon-separation method are established. Do not silently substitute three of these four channels for left/middle/right beacon strengths.
 
@@ -137,11 +165,11 @@ The user specifies **two** ultrasonic sensors at the front, one facing +45° lef
 
 | Signal | Mega pins | Placement / role |
 | --- | --- | --- |
-| Front-left +45° ultrasonic trig/echo | 40 / 41 | User-reported PG1 / PG0 |
-| Front-right −45° ultrasonic trig/echo | 48 / 47 | User-reported PL1 / PL2; keep as wired |
-| Light A left/right; light B left/right | A6 / A3; A2 / A1 | A4→A6 move confirmed; beacon decoding pending |
+| Front-left +45° ultrasonic trig/echo | 48 / 47 | PL1 / PL2 since the 23 Oct plug swap |
+| Front-right −45° ultrasonic trig/echo | 40 / 41 | PG1 / PG0 since the 23 Oct plug swap |
+| Four LDRs, left → right | A0 / A2 / A7 / A6 | Confirmed 27 Oct; higher ADC = brighter; beacon decoding pending |
 | Independent-beacon legacy adapter | A6 / A7 / A8 | Unconnected proposal for a different interface; disabled |
-| MPU6050 driver | SDA 20 / SCL 21 | No gyro connected yet; identify the installed model and CCW sign later |
+| MPU6050 gyro | SDA 20 / SCL 21, INT 33 | Identified at 0x68; `GYRO_SIGN = -1` confirmed 27 Oct |
 | TCS34725 option | SDA 20 / SCL 21 | I²C 0x29, selectable only after identification |
 | Colour S1/S0/S3/S2/OUT | 25 / 28 / 29 / 30 / 32 | User-reported ports; D32/PC5 direct sampler |
 | Optional I²C OLED | SDA 20 / SCL 21 | Default address 0x3c, selectable SSD1306 / SH1106 |

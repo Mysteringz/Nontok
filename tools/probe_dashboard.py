@@ -4,7 +4,8 @@ Diagnostic only: motors stay inhibited by the firmware, and only the probe's
 own no-motion commands are forwarded. Every line is appended to a JSONL log.
 Usage: .venv-dashboard/bin/python tools/probe_dashboard.py [--bluetooth | --port /dev/cu.X]
 The page header can also switch between USB and Bluetooth ports while running.
-Bluetooth samples arrive at 2 Hz (9600 baud); USB at 4 Hz.
+Both links update at 5 Hz. Bluetooth (9600 baud) sends a full sample once a second and a
+short "F," line in between; the server merges them into ordinary samples for the page.
 """
 import argparse
 import collections
@@ -21,12 +22,22 @@ from serial.tools import list_ports
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMANDS = {"STATUS", "PROBE", "GYROINIT", "GYROZERO", "HEADING0", "STOP", "HELP"}
-# Motion: one-motor identify spin, and raw watchdogged drive (firmware caps |v| at 200).
-MOTION = re.compile(r"SPIN [1-4] [+-]|MOT( -?\d{1,3}){4}")
+# Motion: one-motor identify spin, raw watchdogged drive (firmware caps |v| at 200)
+# and the on-board 180-degree turn test.
+MOTION = re.compile(r"SPIN [1-4] [+-]|(MOT|TURNTEST)( -?\d{1,3}){4}"
+                    r"|WMAP( [1-4] -?1){4}|GO [1-4]( -?\d{1,4}){6}|TURN -?\d{1,3}( \d{1,3}){2}")
 PAGE = ROOT / "tools" / "probe_dashboard.html"
+# Competition calibration: 5 s of stationary readings per pose, appended one capture per line.
+CAPTURES = ROOT / ".local-data" / "calibration" / "pose-captures.jsonl"
+# Placement order for the tournament steps: P, then N on the colour paper, then the boxes in
+# their final parking orientation (robot facing the side wall it turned toward).
+POSES = {"p_point": "Checkpoint P (centre of semicircle)", "centre": "Checkpoint N (colour plate)",
+         "right_box": "Right parking box", "left_box": "Left parking box"}
+CAPTURE_SECONDS = 5
+LIGHT_PINS = ("A0", "A7", "A2", "A6")  # Firmware adc[] order; physically left to right A0, A2, A7, A6.
 
 
-BLUETOOTH_TAGS = ("FEETWASHER", "HC-0", "HC0", "DSD", "JDY", "BT0", "BT-")
+BLUETOOTH_TAGS = ("DIVA", "FEETWASHER", "HC-0", "HC0", "DSD", "JDY", "BT0", "BT-")
 SKIP_PORTS = ("Bluetooth-Incoming-Port", "debug-console")
 
 
@@ -44,6 +55,104 @@ def ports():
 
 def utc():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+# Ultrasonics in firmware index order; the F line carries all of them.
+ULTRASONICS = ("left", "right", "front", "side_left", "side_right")
+
+
+def fast_sample(text, full):
+    """Expand a Bluetooth "F,..." line into a sample, other fields from the last full one."""
+    parts = text.split(",")  # F, ms, adc x4, ultrasonic x n, gyro Z angle and rate, colour x4
+    n = len(parts) - 12
+    if not 1 <= n <= 8:
+        return None
+    try:
+        ms, *adc = [int(v) for v in parts[1:6]]
+        us = [int(v) for v in parts[6:6 + n]]
+        yaw, rate = float(parts[6 + n]), float(parts[7 + n])
+        rgbc = [int(v) for v in parts[8 + n:12 + n]]
+    except ValueError:
+        return None
+    gyro = dict((full or {}).get("gyro") or {})
+    gyro["angle_deg"] = (list(gyro.get("angle_deg") or [None, None]))[:2] + [yaw]
+    gyro["rate_dps"] = (list(gyro.get("rate_dps") or [None, None]))[:2] + [rate]
+    record = {k: v for k, v in (full or {}).items() if k in ("boot", "turntest", "step")}
+    record.update({"type": "sample", "link": "bt", "fast": 1, "ms": ms, "adc": adc,
+                   "ultrasonic_mm": us, "gyro": gyro, "color_rgbc": rgbc})
+    return record
+
+
+def channels(sample):
+    """Every numeric reading in one sample, flat; None where missing (no echo = None)."""
+    g = sample.get("gyro") or {}
+    adc, us = sample.get("adc") or [None] * 4, sample.get("ultrasonic_mm") or [None, None]
+    rgbc = sample.get("color_rgbc") or [None] * 4
+    ch = {"ldr_" + pin: v for pin, v in zip(LIGHT_PINS, adc)}
+    us = list(us) + [None] * (len(ULTRASONICS) - len(us))  # Older samples have fewer sensors.
+    ch.update({"us_%s_mm" % name: v if v is not None and v > 0 else None for name, v in zip(ULTRASONICS, us)})
+    for name, key in (("angle", "angle_deg"), ("rate", "rate_dps"), ("accel", "accel_raw")):
+        ch.update({"%s_%s" % (name, axis): v for axis, v in zip("xyz", g.get(key) or [None] * 3)})
+    ch.update({"color_" + c: v for c, v in zip(("red", "green", "blue", "clear"), rgbc)})
+    ch["color_rg_ratio"] = rgbc[0] / rgbc[1] if rgbc[0] and rgbc[1] else None
+    return ch
+
+
+def stats(values):
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return {"n": 0}
+    mean = sum(vals) / len(vals)
+    sd = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+    return {"n": len(vals), "mean": round(mean, 3), "sd": round(sd, 3), "min": min(vals), "max": max(vals)}
+
+
+def capture(link, pose, note):
+    """Record CAPTURE_SECONDS of samples at a pose; returns the summary that was saved."""
+    started, start_seq = utc(), link.seq
+    time.sleep(CAPTURE_SECONDS)
+    _, lines = link.since(start_seq)
+    samples = [l for l in lines if l.get("type") == "sample"]
+    per = [channels(s) for s in samples]
+    summary = {name: stats([c[name] for c in per]) for name in (per[0] if per else {})}
+    warnings = []
+    if len(samples) < 5:
+        warnings.append("only %d samples: link down or too slow" % len(samples))
+    for side in ULTRASONICS:
+        n = summary.get("us_%s_mm" % side, {}).get("n", 0)
+        if samples and n < len(samples):
+            warnings.append("%s ultrasonic: %d of %d samples had no echo" % (side, len(samples) - n, len(samples)))
+        if summary.get("us_%s_mm" % side, {}).get("sd", 0) > 15:
+            warnings.append("%s ultrasonic varies > 15 mm: something moved?" % side)
+    rate = [abs(c["rate_z"]) for c in per if c.get("rate_z") is not None]
+    if rate and max(rate) > 3:
+        warnings.append("gyro saw rotation up to %.1f deg/s: the robot moved during the capture" % max(rate))
+    if any(s.get("ms", 0) < samples[0].get("ms", 0) for s in samples):
+        warnings.append("the Mega rebooted during the capture")
+    record = {"pose": pose, "label": POSES[pose], "note": note, "started": started, "ended": utc(),
+              "seconds": CAPTURE_SECONDS, "link": samples[-1].get("link", "usb") if samples else None,
+              "light_pins_firmware_order": LIGHT_PINS, "light_positions_left_to_right": ["A0", "A2", "A7", "A6"],
+              "samples_n": len(samples), "warnings": warnings, "stats": summary, "samples": samples}
+    CAPTURES.parent.mkdir(parents=True, exist_ok=True)
+    with open(CAPTURES, "a") as out:
+        out.write(json.dumps(record) + "\n")
+    link.add({"type": "marker", "text": "calibration capture: %s, %d samples%s" % (
+        POSES[pose], len(samples), (", WARN: " + "; ".join(warnings)) if warnings else "")})
+    return {k: v for k, v in record.items() if k != "samples"}
+
+
+def saved_captures():
+    if not CAPTURES.exists():
+        return []
+    rows = []
+    for line in CAPTURES.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        record.pop("samples", None)
+        rows.append(record)
+    return rows
 
 
 class Link:
@@ -87,6 +196,7 @@ class Link:
                 device.open()
                 self.status = "port open " + port
                 buffer = b""
+                last_full = None  # Latest full sample, for merging F lines.
                 next_ping = 0
                 last_rx = time.time()
                 while self.generation == generation:
@@ -111,11 +221,18 @@ class Link:
                         text = raw.decode(errors="replace").strip()
                         if not text:
                             continue
-                        try:
-                            record = json.loads(text)
-                        except ValueError:
-                            record = {"unparsed": text}
-                        self.add(record if isinstance(record, dict) else {"value": record})
+                        if text.startswith("F,"):
+                            record = fast_sample(text, last_full) or {"unparsed": text}
+                        else:
+                            try:
+                                record = json.loads(text)
+                            except ValueError:
+                                record = {"unparsed": text}
+                        if not isinstance(record, dict):
+                            record = {"value": record}
+                        if record.get("type") == "sample" and not record.get("fast"):
+                            last_full = record
+                        self.add(record)
                     buffer = buffer[-4096:]
             except (serial.SerialException, OSError) as error:
                 if self.generation == generation:
@@ -148,6 +265,8 @@ class Link:
 
 
 def handler(link):
+    capture_lock = threading.Lock()
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
@@ -165,6 +284,9 @@ def handler(link):
                 self.send(PAGE.read_bytes(), "text/html; charset=utf-8")
             elif self.path == "/api/ports":
                 self.send({"ports": ports(), "selected": link.port})
+            elif self.path == "/api/captures":
+                self.send({"captures": saved_captures(), "file": str(CAPTURES.relative_to(ROOT)),
+                           "poses": POSES, "seconds": CAPTURE_SECONDS})
             elif self.path.startswith("/api/lines"):
                 try:
                     after = int(self.path.partition("after=")[2] or 0)
@@ -193,6 +315,14 @@ def handler(link):
                     return self.send_error(400)
                 link.select(port or None)
                 return self.send({"selected": link.port})
+            if self.path == "/api/capture" and body.get("pose") in POSES:
+                if not capture_lock.acquire(blocking=False):
+                    return self.send_error(409, "a capture is already running")
+                try:
+                    note = body.get("note") if isinstance(body.get("note"), str) else ""
+                    return self.send(capture(link, body["pose"], note[:200]))
+                finally:
+                    capture_lock.release()
             if self.path == "/api/mark" and isinstance(body.get("text"), str):
                 # Operator label for the field log; never sent to the robot.
                 link.add({"type": "marker", "text": body["text"][:200]})

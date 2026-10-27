@@ -52,7 +52,13 @@ const unsigned long BLUETOOTH_BAUD = BLUETOOTH_UART == 0 ? USB_BAUD : 9600;
 #endif
 const uint8_t RANGE_TRIG[2] = {48, 40};
 const uint8_t RANGE_ECHO[2] = {RANGE_LEFT_ECHO_PIN, 41};
-// User-reported 2026-10-23: four LDR channels, physically left to right, on A0/A7/A2/A6
+// Front ultrasonic, added 27 Oct: TRIG PA0 = D22, ECHO PA2 = D24. Read by the hardware probe;
+// the mission, localization and MEGA3 telemetry still use only left/right.
+const uint8_t RANGE_FRONT_TRIG = 22, RANGE_FRONT_ECHO = 24;
+// Side ultrasonics, wired 27 Oct, {left facing +90 deg, right facing -90 deg}: TRIG PB4/PH3,
+// ECHO PB5/PH4 on the SERVO row. Probe only, like the front sensor.
+const uint8_t RANGE_SIDE_TRIG[2] = {10, 6}, RANGE_SIDE_ECHO[2] = {11, 7};
+// Four LDR channels, physically left to right on A0/A2/A7/A6 (confirmed 27 Oct; LDR_PIN below)
 // (A1 and A3 not used; A4/A5 belong to M4). Four channels, NOT three identified beacons.
 constexpr uint8_t LIGHT_SENSOR_PIN[4] = {A0,A7,A2,A6};
 static_assert(LIGHT_SENSOR_PIN[0]!=A4&&LIGHT_SENSOR_PIN[1]!=A4&&LIGHT_SENSOR_PIN[2]!=A4&&LIGHT_SENSOR_PIN[3]!=A4&&
@@ -67,9 +73,10 @@ static_assert(LIGHT_SENSOR_PIN[0]!=A4&&LIGHT_SENSOR_PIN[1]!=A4&&LIGHT_SENSOR_PIN
 #endif
 // Legacy adapter proposal only; the reported four-channel interface is not decoded yet.
 const uint8_t LIGHT_PIN[3] = {A6,A7,A8}; // left, middle, right resolved beacon strengths
-const bool LIGHT_HIGH_IS_BRIGHT = false; // Measured 23 Oct: covering an LDR raises its reading.
-const uint8_t IMU_ADDRESS = 0x68; // MPU6050 identified 2026-10-23 on the shield IMU header (D20/D21).
-const float GYRO_SIGN = 1.0f; // Positive CCW. Chip Z points down, so expect -1: confirm by rotation.
+const bool LIGHT_HIGH_IS_BRIGHT = true; // Measured 27 Oct (flashlight raises the reading); reverses 23 Oct.
+const uint8_t LDR_PIN[4] = {A0,A2,A7,A6}; // The four installed LDRs, left to right (confirmed 27 Oct); not yet decoded.
+const uint8_t IMU_ADDRESS = 0x68; // MPU6050 identified 2026-10-23 on the shield IMU header (D20/D21), INT D33.
+const float GYRO_SIGN = -1.0f; // Positive CCW. Confirmed 27 Oct by hand: 4 x 90 deg left read raw Z -357.4 deg.
 // 0 off; 1 TCS34725 I2C; 2 TCS230/TCS3200-compatible frequency module.
 // IMG_3849 shows GND/OUT/S2/S3/VCC: select 2, but wiring stays gated below.
 #ifndef COLOR_DRIVER

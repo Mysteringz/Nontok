@@ -6,11 +6,11 @@
 <title>Probe Live View</title>
 <style>
 :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --mute:#667085; --line:#e4e7ec; --bad:#c0362c; --ok:#1f7a4d;
-  --c0:#2a6fdb; --c1:#d9480f; --c2:#2b8a3e; --c3:#9c36b5; }
+  --c0:#2a6fdb; --c1:#d9480f; --c2:#2b8a3e; --c3:#9c36b5; --c4:#0b7285; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#111418; --card:#1a1e24; --ink:#e7eaee;
-  --mute:#98a2b3; --line:#2b313a; --bad:#ff6b5e; --ok:#4cc38a; --c0:#6ea8ff; --c1:#ff922b; --c2:#69db7c; --c3:#da77f2; } }
+  --mute:#98a2b3; --line:#2b313a; --bad:#ff6b5e; --ok:#4cc38a; --c0:#6ea8ff; --c1:#ff922b; --c2:#69db7c; --c3:#da77f2; --c4:#66d9e8; } }
 :root[data-theme="dark"] { --bg:#111418; --card:#1a1e24; --ink:#e7eaee; --mute:#98a2b3; --line:#2b313a; --bad:#ff6b5e;
-  --ok:#4cc38a; --c0:#6ea8ff; --c1:#ff922b; --c2:#69db7c; --c3:#da77f2; }
+  --ok:#4cc38a; --c0:#6ea8ff; --c1:#ff922b; --c2:#69db7c; --c3:#da77f2; --c4:#66d9e8; }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.4 -apple-system,system-ui,sans-serif; }
 header { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); }
@@ -39,9 +39,18 @@ pre { margin:0; font:12px/1.4 ui-monospace,monospace; white-space:pre-wrap; word
 .legend { position:absolute; bottom:12px; left:12px; font-size:12px; color:var(--mute); }
 #swatch { width:56px; height:56px; border-radius:10px; border:1px solid var(--line); background:var(--bg); }
 [hidden] { display:none !important; }
-.motors { display:grid; grid-template-columns:minmax(240px,340px) 1fr; gap:16px; align-items:start; }
-@media (max-width:700px) { .motors { grid-template-columns:1fr; } }
-.motors svg { width:100%; max-width:340px; display:block; margin:auto; }
+.motors { display:grid; grid-template-columns:150px 1fr minmax(0,320px); gap:12px; align-items:start; }
+@media (max-width:900px) { .motors { grid-template-columns:120px 1fr; } .motors pre { grid-column:1/-1; } }
+.motors svg { width:100%; display:block; }
+.motors .row { margin:4px 0; }
+.hint { font-size:12px; color:var(--mute); }
+.ldr { display:flex; gap:8px; align-items:flex-end; }
+.ldr > div { text-align:center; font-size:11px; color:var(--mute); line-height:1.2; }
+.ldr b, .hud .ldr b { display:block; font-size:13px; color:var(--ink); font-variant-numeric:tabular-nums; }
+.ldr .bar { width:22px; height:46px; margin:0 auto 3px; border:1px solid var(--line); border-radius:4px;
+  position:relative; overflow:hidden; background:var(--bg); }
+.ldr .bar i { position:absolute; left:0; right:0; bottom:0; background:#ffc828; }
+.ldr .top .bar { border-color:#ffc828; } .ldr .top b { color:#d99a00; }
 .wheel { cursor:pointer; fill:var(--ink); opacity:.75; } .wheel:hover { opacity:1; }
 .wheel.picked { fill:var(--c1); opacity:1; }
 .step { margin:8px 0; } .step b { font-weight:600; }
@@ -49,9 +58,24 @@ pre { margin:0; font:12px/1.4 ui-monospace,monospace; white-space:pre-wrap; word
 button:disabled { opacity:.4; cursor:not-allowed; }
 .warn { color:var(--bad); font-weight:600; }
 kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px ui-monospace,monospace; }
-.pad button { width:44px; height:38px; }
-.big-stop { background:var(--bad); color:#fff; border-color:var(--bad); font-weight:700; padding:8px 18px; }
+.pad button { width:36px; height:30px; padding:0; }
+.big-stop { background:var(--bad); color:#fff; border-color:var(--bad); font-weight:700; padding:6px 14px; }
 .note { font-size:12px; color:var(--mute); padding:0 16px 16px; }
+.cal-steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px; margin-bottom:8px; }
+.cal-steps button { text-align:left; padding:10px 12px; display:flex; flex-direction:column; gap:2px; }
+.cal-steps button b { font-size:14px; } .cal-steps button span { font-size:12px; color:var(--mute); }
+.cal-steps button.done { border-color:var(--ok); } .cal-steps button.done span { color:var(--ok); }
+.cal-steps button.warned { border-color:var(--c1); } .cal-steps button.warned span { color:var(--c1); }
+.cal-steps button.busy { border-color:var(--c0); }
+.cal-table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
+.cal-table th, .cal-table td { text-align:right; padding:3px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+.cal-table th:first-child, .cal-table td:first-child { text-align:left; color:var(--mute); }
+.cal-wrap { overflow-x:auto; }
+.st-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr)); gap:8px; margin:8px 0; }
+.st-card { border:1px solid var(--line); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px; }
+.st-card b { font-size:14px; } .st-card .hint { min-height:2.6em; }
+.st-card.running { border-color:var(--c0); } .st-card.reached { border-color:var(--ok); } .st-card.aborted { border-color:var(--bad); }
+.st-locate { font-size:13px; font-variant-numeric:tabular-nums; line-height:1.6; }
 </style>
 </head>
 <body>
@@ -77,60 +101,48 @@ kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px 
   </div>
 </header>
 <main>
-  <section class="wide"><h2>Car view (live yaw from gyro Z, ultrasonic beams at ±45°)</h2>
+  <section class="wide"><h2>Car view (live yaw from gyro Z, ultrasonic beams at ±45°, front and both sides)</h2>
     <div class="view"><canvas id="car"></canvas>
       <div class="hud">
         <div class="val"><b id="h-yaw">—</b><span>yaw (CCW +)</span></div>
         <div class="val"><b id="h-rate">—</b><span>yaw rate °/s</span></div>
         <div class="val"><b id="h-l">—</b><span>left 45°</span></div>
         <div class="val"><b id="h-r">—</b><span>right 45°</span></div>
+        <div class="val"><b id="h-f">—</b><span>front</span></div>
+        <div class="val"><b id="h-sl">—</b><span>left side</span></div>
+        <div class="val"><b id="h-sr">—</b><span>right side</span></div>
         <div class="val"><b id="h-col">—</b><span>floor colour (confidence)</span></div>
+        <div class="val"><div id="h-ldr"></div><span>light level, left → right</span></div>
       </div>
       <div class="legend">Grid rings every 0.5 m · scroll to zoom · car outline and sensor positions not yet measured</div>
       <div class="hud-r"><button id="flip" style="pointer-events:auto">Yaw sign: −Z</button></div>
     </div>
   </section>
-  <section class="wide"><h2>Motors: identify wheels &amp; drive</h2>
-    <div class="motors">
-      <svg viewBox="-50 0 400 380" aria-label="Robot top view, front at top">
-        <polygon points="150,8 185,58 160,58 160,84 140,84 140,58 115,58" fill="var(--c0)"/>
-        <text x="150" y="102" text-anchor="middle" fill="var(--c0)" font-size="14" font-weight="700">FRONT</text>
-        <rect x="80" y="115" width="140" height="230" rx="22" fill="var(--c0)" opacity=".25" stroke="var(--c0)"/>
-        <g id="wheels"></g>
-        <text x="150" y="235" text-anchor="middle" fill="var(--mute)" font-size="12">top view</text>
-      </svg>
-      <div>
-        <div class="row"><button class="big-stop" id="motor-stop" title="Also: Space">■ STOP MOTORS</button>
-          <span style="color:var(--mute)">Space also stops. Robot battery must be ON for motor tests: on USB power alone a motor can freeze the board.</span></div>
-        <label class="row"><input type="checkbox" id="lifted">
-          <span class="warn">Wheels are lifted off the ground (or the area around the robot is clear)</span></label>
-        <div class="step"><b>1. Identify.</b> Click a wheel on the diagram, choose its motor and direction.
-          Not sure which motor? Spin one (PWM 90, 0.8 s) and watch which wheel moves.</div>
-        <div class="row" id="spin-buttons"></div>
-        <div class="row" id="prompt" style="color:var(--mute)">Not started.</div>
-        <div id="assign" hidden>
-          <div class="row">Motor: <span id="assign-motors"></span></div>
-          <div class="row">On the last spin this wheel rolled:
-            <button id="dir-fwd">Forward ↑ (toward FRONT)</button><button id="dir-back">Backward ↓</button>
-            <button id="assign-clear">Clear this wheel</button></div>
-        </div>
-        <div class="row"><button id="map-reset">Reset mapping</button></div>
-        <pre id="map-out"></pre>
-        <div class="step"><b>2. Drive.</b> Hold keys: <kbd>W</kbd>/<kbd>S</kbd> forward/back, <kbd>A</kbd>/<kbd>D</kbd> turn left/right,
-          <kbd>Q</kbd>/<kbd>E</kbd> strafe left/right, <kbd>Space</kbd> stop.
-          Hold <kbd>Shift</kbd> for <b>linear mode</b>: <kbd>A</kbd>/<kbd>D</kbd> strafe instead of turning, so WASD moves straight front/side with no rotation
-          (W+D = diagonal). Releasing every key stops; the robot also stops itself 0.4 s after the last command.</div>
-        <div class="row"><label><input type="checkbox" id="drive-on" disabled> Enable keyboard drive</label>
-          <label>Speed <input type="range" id="speed" min="40" max="200" value="100"> <span id="speed-v">100</span>/255</label></div>
-        <div class="row pad">
-          <button data-k="q">Q</button><button data-k="w">W</button><button data-k="e">E</button>
-          <button data-k="a">A</button><button data-k="s">S</button><button data-k="d">D</button>
-          <button id="linear" title="Same as holding Shift" style="width:auto">⇧ Linear: off</button>
-          <span id="drive-state" style="color:var(--mute);margin-left:8px">drive off</span></div>
-      </div>
-    </div>
+  <section class="wide"><h2>Competition calibration: record poses</h2>
+    <div class="cal-steps" id="cal-steps"></div>
+    <div class="row"><input id="cal-note" placeholder="Note saved with the next capture (optional): measured position, heading, lights on/off…"
+        style="font:inherit;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink);flex:1;min-width:240px"></div>
+    <div class="row hint" id="cal-status">Place the robot, let it settle, then click the pose. It records every sensor for 5 s: keep hands and the robot still.</div>
+    <div class="cal-wrap"><table class="cal-table" id="cal-table"></table></div>
+    <div class="hint" id="cal-file"></div>
   </section>
-  <section><h2>LDRs A0 · A7 · A2 · A6 (left → right, ADC: lower = brighter)</h2><div class="vals" id="v-light"></div><canvas id="g-light"></canvas></section>
+  <section class="wide"><h2>Tournament step test</h2>
+    <div class="hint">Each Run sends one step that the robot carries out on its own (heading by gyro at 200 Hz, ranges at ~10 Hz).
+      Targets come from the latest capture of each checkpoint. Needs: all four wheels identified, "Wheels lifted / area clear" ticked,
+      gyro zeroed. Speed = the drive slider (capped at 150). <kbd>Space</kbd> or STOP cancels.</div>
+    <div class="st-grid">
+      <div class="st-card" id="st-c0"><b>00 · Locate</b><div class="st-locate" id="st-locate">waiting for data…</div></div>
+      <div class="st-card" id="st-c1"><b>01 · Centre at P</b><span class="hint" id="st-s1">Side sensors equal, left/right 45° equal, front distance = P. Stores the square heading.</span><button id="st-r1">Run 01</button></div>
+      <div class="st-card" id="st-c2"><b>02 · Straight to N</b><span class="hint" id="st-s2">Holds the square heading by gyro and stays centred on the side sensors until the front distance = N.</span><button id="st-r2">Run 02</button></div>
+      <div class="st-card" id="st-c3"><b>03 · Turn by colour</b><span class="hint" id="st-s3">Green → left 90°, red → right 90°, to exactly square ± 90° on the gyro.</span><button id="st-r3">Run 03</button></div>
+      <div class="st-card" id="st-c4"><b>04 · Park</b><span class="hint" id="st-s4">Into the box on the turned side: front distance and back-wall distance (side sensor) = the box capture.</span><button id="st-r4">Run 04</button></div>
+    </div>
+    <div class="row"><button class="big-stop" id="st-stop">■ STOP</button>
+      <label>Min power <input type="range" id="st-min" min="30" max="120" value="55"> <span id="st-min-v">55</span>/255</label>
+      <span class="hint">the lowest power that still moves the robot; raise it if a step stops short and times out</span></div>
+    <div class="hint" id="st-msg"></div>
+  </section>
+  <section><h2>LDRs A0 · A2 · A7 · A6 (left → right, ADC: higher = brighter)</h2><div class="vals" id="v-light"></div><canvas id="g-light"></canvas></section>
   <section><h2>Ultrasonic (mm, gaps = no echo)</h2><div class="vals" id="v-us"></div><canvas id="g-us"></canvas></section>
   <section><h2>Gyro angle (°, integrated since zero)</h2><div class="vals" id="v-ang"></div><canvas id="g-ang"></canvas></section>
   <section><h2>Gyro rate (°/s) &amp; accel</h2><div class="vals" id="v-rate"></div><canvas id="g-rate"></canvas></section>
@@ -140,6 +152,50 @@ kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px 
       <button id="ref-red" title="Red paper under the sensor, then click">Set red ref</button></div>
     <div class="vals" id="v-col"></div><canvas id="g-col"></canvas></section>
   <section><h2>Events</h2><pre id="events"></pre></section>
+  <section><h2>Data buffer</h2>
+    <div class="vals">
+      <div class="val"><b id="buf-rows">0</b><span>samples</span></div>
+      <div class="val"><b id="buf-events">0</b><span>events</span></div>
+      <div class="val"><b id="buf-span">—</b><span>time covered</span></div>
+      <div class="val"><b id="buf-state">recording</b><span id="buf-note">since page load</span></div>
+    </div>
+    <div class="row"><button id="buf-pause">Pause</button><button id="buf-clear">Clear</button>
+      <button id="buf-save">Save as .txt</button></div>
+    <div class="hint">Tab-separated, one sample per row; events and marks are interleaved as <code>#</code> lines.
+      Keeps the newest 200,000 lines.</div>
+  </section>
+  <section class="wide"><h2>Motors</h2>
+    <div class="motors">
+      <svg viewBox="-50 0 400 380" aria-label="Robot top view, front at top">
+        <polygon points="150,8 185,58 160,58 160,84 140,84 140,58 115,58" fill="var(--c0)"/>
+        <text x="150" y="102" text-anchor="middle" fill="var(--c0)" font-size="14" font-weight="700">FRONT</text>
+        <rect x="80" y="115" width="140" height="230" rx="22" fill="var(--c0)" opacity=".25" stroke="var(--c0)"/>
+        <g id="wheels"></g>
+      </svg>
+      <div>
+        <div class="row"><button class="big-stop" id="motor-stop" title="Also: Space">■ STOP</button>
+          <label class="warn"><input type="checkbox" id="lifted"> Wheels lifted / area clear</label>
+          <span class="hint" title="On USB power alone a motor can freeze the board">Battery must be ON</span></div>
+        <div class="row"><b>Identify</b><span class="row" style="margin:0" id="spin-buttons"></span><button id="map-reset">Reset map</button></div>
+        <div class="row hint" id="prompt">Click a wheel, then choose its motor and direction. Spin = PWM 90 for 0.8 s.</div>
+        <div class="row" id="assign" hidden>Motor <span id="assign-motors"></span> · last spin rolled
+          <button id="dir-fwd">Forward ↑</button><button id="dir-back">Back ↓</button><button id="assign-clear">Clear</button></div>
+        <div class="row"><b>Drive</b><label><input type="checkbox" id="drive-on" disabled> keyboard</label>
+          <label>Speed <input type="range" id="speed" min="40" max="200" value="100"> <span id="speed-v">100</span>/255</label></div>
+        <div class="row pad">
+          <button data-k="q">Q</button><button data-k="w">W</button><button data-k="e">E</button>
+          <button data-k="a">A</button><button data-k="s">S</button><button data-k="d">D</button>
+          <button id="linear" title="Same as holding Shift" style="width:auto">⇧ Linear: off</button>
+          <span id="drive-state" class="hint">drive off</span></div>
+        <div class="row"><b>Link test</b><button id="tt-start" disabled
+            title="Robot turns 180° and back, 4 times, on its own using the gyro. Needs floor space and the wheel map.">Turn 180° and back ×4</button>
+          <span id="tt-state" class="hint">Runs on the Mega, so it keeps turning through a link blackout. Space / STOP cancels.</span></div>
+        <div class="hint"><kbd>W</kbd>/<kbd>S</kbd> fwd/back · <kbd>A</kbd>/<kbd>D</kbd> turn · <kbd>Q</kbd>/<kbd>E</kbd> strafe ·
+          hold <kbd>⇧</kbd> for linear (A/D strafe, no rotation) · <kbd>Space</kbd> stop · auto-stop 0.4 s after the last command</div>
+      </div>
+      <pre id="map-out"></pre>
+    </div>
+  </section>
 </main>
 <p class="note" id="log"></p>
 <script>
@@ -147,8 +203,8 @@ const WINDOW_MS = 60000, $ = id => document.getElementById(id);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const series = {};  // chart id -> array of {t, v:[...]}
 const charts = {
-  light: { names:['L1 A0','L2 A7','L3 A2','L4 A6'], get:s => s.adc, min:0, max:1023 },
-  us: { names:['left','right'], get:s => s.ultrasonic_mm.map(v => v > 0 ? v : null), min:0 },
+  light: { names:['L1 A0','L2 A2','L3 A7','L4 A6'], get:s => s.light },  // auto-range: readings span a few hundred counts
+  us: { names:['left 45°','right 45°','front','left side','right side'], get:s => [0, 1, 2, 3, 4].map(i => s.ultrasonic_mm[i] > 0 ? s.ultrasonic_mm[i] : null), min:0 },
   ang: { names:['X','Y','Z (yaw)'], get:s => s.gyro && s.gyro.angle_deg || [null,null,null] },
   rate: { names:['X','Y','Z'], get:s => s.gyro && s.gyro.rate_dps || [null,null,null] },
   col: { names:['red','green','blue','clear'], get:s => s.color_rgbc || [null,null,null,null], min:0 },
@@ -185,11 +241,39 @@ function sample(s) {
     while (series[id].length && t - series[id][0].t > WINDOW_MS) series[id].shift();
   }
   const g = s.gyro || {};
-  values('light', s.adc); values('us', s.ultrasonic_mm.map(v => v > 0 ? v : null));
-  values('ang', g.angle_deg || [], `<div class="val"><b>${g.angles_valid ? 'valid' : 'INVALID'}</b><span>${g.model || 'no gyro'}</span></div>`);
+  values('light', s.light, ldrMeter(s.light)); $('h-ldr').innerHTML = ldrMeter(s.light); values('us', s.ultrasonic_mm.map(v => v > 0 ? v : null));
+  values('ang', g.angle_deg || [], `<div class="val"><b>${g.bias_valid === 0 ? 'NOT ZEROED' : g.angles_valid ? 'valid' : 'INVALID'}</b>` +
+    `<span>${g.bias_valid === 0 ? 'hold still ~2 s: zeroes itself' : g.model || 'no gyro'}</span></div>`);
   values('rate', g.rate_dps || [], `<div class="val"><b>${(g.accel_raw || []).join(' / ') || '—'}</b><span>accel raw X/Y/Z</span></div>` +
-    `<div class="val"><b>${g.int_rises ?? '—'}</b><span>INT rises</span></div><div class="val"><b>${g.bus_errors ?? '—'}</b><span>bus errors</span></div>`);
-  values('col', s.color_rgbc || []); showColour(s.color_rgbc);
+    `<div class="val"><b>${g.int_rises ?? '—'}</b><span>INT rises</span></div><div class="val"><b>${g.bus_errors ?? '—'}</b><span>bus errors</span></div>` +
+    `<div class="val"><b>${g.i2c_timeouts ?? '—'}</b><span>I²C timeouts (bus freed)</span></div>` +
+    `<div class="val"><b>${g.gyro_restarts ?? '—'}</b><span>gyro re-setups</span></div>` +
+    `<div class="val"><b>${g.gyro_resets ?? '—'}</b><span>gyro chip resets</span></div>`);
+  values('col', s.color_rgbc || []); showColour(s.color_rgbc); stLocate(s);
+}
+// ---- LDR light level: higher ADC = brighter (checked with a flashlight, 27 Oct) ------------------------------------
+// Firmware reports adc[] in pin order A0, A7, A2, A6; the sensors sit left to right as A0, A2, A7, A6.
+const LIGHT = '#ffc828', LDR_NAMES = ['A0', 'A2', 'A7', 'A6'], LDR_ORDER = [0, 2, 1, 3];
+function lightRange() {   // last minute's ADC span over all four, at least 60 counts so noise isn't amplified
+  const vals = (series.light || []).flatMap(p => p.v).filter(v => v != null);
+  if (!vals.length) return { lo:0, hi:1023 };
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (hi - lo < 60) { const mid = (hi + lo) / 2; lo = mid - 30; hi = mid + 30; }
+  return { lo, hi };
+}
+function lightRel(v) {    // 0 = darkest seen recently, 1 = brightest
+  if (v == null) return 0;
+  const { lo, hi } = lightRange();
+  return Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+}
+function ldrMeter(adc) {  // bar height = absolute brightness; glow = relative; brightest is marked
+  if (!adc) return '';
+  const top = adc.indexOf(Math.max(...adc));
+  return `<div class="ldr">` + adc.map((v, i) => {
+    const pct = Math.round(100 * v / 1023), rel = lightRel(v);
+    return `<div class="${i === top ? 'top' : ''}"><div class="bar" style="box-shadow:0 0 ${Math.round(14 * rel)}px ${LIGHT}">` +
+      `<i style="height:${pct}%;opacity:${0.35 + 0.65 * rel}"></i></div><b>${pct}%</b>${LDR_NAMES[i]}</div>`;
+  }).join('') + `</div>`;
 }
 function event(r) {
   const pre = $('events'), { seq, received_at, ...rest } = r;
@@ -224,7 +308,8 @@ $('ref-red').onclick = () => setRef('red');
 
 // ---- Car view ----------------------------------------------------------
 const CAR = { w:230, l:300 };                 // mm, nominal until measured
-const SENSORS = [{ x:-95, y:150, a:45 }, { x:95, y:150, a:-45 }];  // left, right; a = deg CCW from forward
+// Firmware index order: left 45, right 45, front, left side, right side; a = deg CCW from forward.
+const SENSORS = [{ x:-95, y:150, a:45 }, { x:95, y:150, a:-45 }, { x:0, y:150, a:0 }, { x:-115, y:0, a:90 }, { x:115, y:0, a:-90 }];
 const BEAM_HALF = 15, NO_ECHO_MM = 4000;
 let VIEW_MM = 1200;  // scroll on the view to zoom 0.5-4 m
 let latest = null, shownYaw = 0, yawSign = -1;  // chip Z points down: expect yaw = -Z (unconfirmed)
@@ -251,7 +336,7 @@ function drawCar() {
   // Smoothly follow the measured yaw along the shortest way round.
   const target = yawNow(); shownYaw += ((target - shownYaw + 540) % 360 - 180) * 0.25;
   x.save(); x.translate(cx, cy); x.rotate(-shownYaw * Math.PI / 180); x.scale(k, -k);  // y up, CCW positive
-  const us = latest ? latest.ultrasonic_mm : [-1, -1];
+  const us = latest ? latest.ultrasonic_mm : [-1, -1, -1, -1, -1];
   SENSORS.forEach((s, i) => {
     const mm = us[i], ok = mm > 0, len = ok ? mm : Math.min(NO_ECHO_MM, VIEW_MM * 1.4);
     const a0 = (90 + s.a - BEAM_HALF) * Math.PI / 180, a1 = (90 + s.a + BEAM_HALF) * Math.PI / 180;
@@ -272,12 +357,15 @@ function drawCar() {
   x.fillStyle = css('--card'); x.globalAlpha = 0.35;
   x.beginPath(); x.moveTo(-CAR.w * 0.32, CAR.l * 0.18); x.lineTo(CAR.w * 0.32, CAR.l * 0.18); x.lineTo(CAR.w * 0.24, CAR.l * 0.36); x.lineTo(-CAR.w * 0.24, CAR.l * 0.36); x.fill();
   x.globalAlpha = 1;
-  // LDRs (A0, A7, A2, A6) along the front edge, left to right, brightness = ADC.
-  const adc = latest ? latest.adc : [0, 0, 0, 0];
-  adc.forEach((v, i) => {
-    const px = -CAR.w * 0.36 + i * CAR.w * 0.24;
-    x.fillStyle = `rgba(255,200,40,${0.15 + 0.85 * (1023 - v) / 1023})`;  // lower ADC = brighter x.fillRect(px - 18, CAR.l / 2 - 26, 36, 22);
-    x.strokeStyle = css('--card'); x.lineWidth = 3; x.strokeRect(px - 18, CAR.l / 2 - 26, 36, 22);
+  // LDRs (A0, A2, A7, A6) along the front edge, left to right. Glow is relative to the
+  // last minute's range so small differences show; the brightest one is outlined.
+  const adc = latest ? latest.light : null, top = adc ? adc.indexOf(Math.max(...adc)) : -1;
+  (adc || [null, null, null, null]).forEach((v, i) => {
+    const px = -CAR.w * 0.36 + i * CAR.w * 0.24, rel = lightRel(v);
+    x.save(); x.shadowColor = LIGHT; x.shadowBlur = 40 * rel;
+    x.fillStyle = `rgba(255,200,40,${0.08 + 0.92 * rel})`; x.fillRect(px - 22, CAR.l / 2 - 34, 44, 30); x.restore();
+    x.strokeStyle = i === top ? LIGHT : css('--card'); x.lineWidth = i === top ? 6 : 3;
+    x.strokeRect(px - 22, CAR.l / 2 - 34, 44, 30);
   });
   // Colour sensor under the front: patch of the colour it currently sees.
   x.beginPath(); x.arc(0, CAR.l * 0.05, 34, 0, 2 * Math.PI);
@@ -298,6 +386,7 @@ function drawCar() {
   $('h-yaw').textContent = g && g.angle_deg ? fmt(target, 1) + '°' + (g.angles_valid ? '' : ' (invalid)') : '—';
   $('h-rate').textContent = g && g.rate_dps ? fmt(yawSign * g.rate_dps[2], 1) : '—';
   $('h-l').textContent = us[0] > 0 ? us[0] + ' mm' : 'no echo'; $('h-r').textContent = us[1] > 0 ? us[1] + ' mm' : 'no echo';
+  [['h-f', 2], ['h-sl', 3], ['h-sr', 4]].forEach(([id, i]) => $(id).textContent = us[i] > 0 ? us[i] + ' mm' : us[i] == null ? '—' : 'no echo');
   $('h-col').textContent = colour ? `${colour.name} ${Math.round(100 * colour.confidence)}%` : '—';
   $('h-col').style.color = colour ? `rgb(${colour.rgb})` : '';
   requestAnimationFrame(drawCar);
@@ -305,6 +394,55 @@ function drawCar() {
 $('car').parentElement.addEventListener('wheel', e => { e.preventDefault();
   VIEW_MM = Math.min(4000, Math.max(500, VIEW_MM * (e.deltaY > 0 ? 1.1 : 0.9))); }, { passive:false });
 requestAnimationFrame(drawCar);
+
+// ---- Data buffer: every received line, saved on request as a tab-separated text file --
+const BUF_MAX = 200000, COLS = ['time', 'ms', 'L1_A0', 'L2_A2', 'L3_A7', 'L4_A6', 'us_left_mm', 'us_right_mm', 'us_front_mm', 'us_side_left_mm', 'us_side_right_mm',
+  'ang_x', 'ang_y', 'ang_z', 'rate_x', 'rate_y', 'rate_z', 'accel_x', 'accel_y', 'accel_z', 'angles_valid',
+  'red', 'green', 'blue', 'clear', 'bus_errors', 'i2c_timeouts', 'gyro_restarts', 'gyro_resets', 'bias_valid', 'link'];
+let buffer = [], bufPaused = false, bufDropped = 0;
+const pad = (n, w = 2) => String(n).padStart(w, '0');
+function localTime(iso) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+}
+function bufferLine(line) {
+  if (bufPaused) return;
+  buffer.push(line);
+  if (buffer.length > BUF_MAX) { buffer.splice(0, buffer.length - BUF_MAX); bufDropped++; }
+}
+function showBuffer() {
+  const rows = buffer.filter(l => l.type === 'sample').length;
+  $('buf-rows').textContent = rows; $('buf-events').textContent = buffer.length - rows;
+  const s = buffer.length > 1 ? (new Date(buffer.at(-1).received_at) - new Date(buffer[0].received_at)) / 1000 : null;
+  $('buf-span').textContent = s == null ? '—' : s < 120 ? `${s.toFixed(0)} s` : `${(s / 60).toFixed(1)} min`;
+  $('buf-state').textContent = bufPaused ? 'paused' : 'recording';
+  $('buf-state').style.color = bufPaused ? 'var(--bad)' : 'var(--ok)';
+  $('buf-note').textContent = bufDropped ? 'oldest lines dropped' : 'since page load / clear';
+}
+function bufferText() {
+  const out = [`# Hardware probe capture saved ${localTime(new Date().toISOString())} (local time)`,
+    '# Ultrasonic -1 = no echo. Event and mark lines start with #.', COLS.join('\t')];
+  for (const l of buffer) {
+    if (l.type !== 'sample') {
+      const { seq, received_at, type, ...rest } = l;
+      out.push(`# ${localTime(received_at)}\t${type}\t${JSON.stringify(rest)}`);
+      continue;
+    }
+    const g = l.gyro || {}, three = a => a || ['', '', ''];
+    out.push([localTime(l.received_at), l.ms, ...l.light, ...[0, 1, 2, 3, 4].map(i => l.ultrasonic_mm[i] ?? ''), ...three(g.angle_deg), ...three(g.rate_dps),
+      ...three(g.accel_raw), g.angles_valid ?? '', ...(l.color_rgbc || ['', '', '', '']), g.bus_errors ?? '', g.i2c_timeouts ?? '', g.gyro_restarts ?? '', g.gyro_resets ?? '', g.bias_valid ?? '', l.link ?? ''].join('\t'));
+  }
+  return out.join('\n') + '\n';
+}
+$('buf-pause').onclick = () => { bufPaused = !bufPaused; $('buf-pause').textContent = bufPaused ? 'Resume' : 'Pause'; showBuffer(); };
+$('buf-clear').onclick = () => { buffer = []; bufDropped = 0; showBuffer(); };
+$('buf-save').onclick = () => {
+  if (!buffer.length) return;
+  const a = document.createElement('a'), now = new Date();
+  a.href = URL.createObjectURL(new Blob([bufferText()], { type:'text/plain' }));
+  a.download = `probe-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
 
 let after = 0, lastSample = 0;
 async function poll() {
@@ -314,6 +452,8 @@ async function poll() {
     $('link').className = 'badge ' + (r.status.startsWith('connected') ? 'ok' : 'bad');
     $('log').textContent = 'Logging every line to ' + r.log;
     for (const line of r.lines) {
+      if (line.adc) line.light = LDR_ORDER.map(i => line.adc[i]);  // left-to-right sensor order
+      bufferLine(line);
       if (line.type === 'sample') {
         // Uptime going backwards = the Mega rebooted (ready lines are not sent over Bluetooth).
         if (latest && line.ms < latest.ms) {
@@ -321,9 +461,10 @@ async function poll() {
           event({ seq: 0, received_at: new Date().toISOString(), note: msg }); mark(msg);
           if ($('drive-on').checked) { $('drive-on').checked = false; stopDrive(true); }
           prompt(msg + '. Drive disabled. brownout = battery/supply dip under motor load.');
-        }
-        sample(line); latest = line; lastSample = Date.now();
-      } else event(line);
+        } else if (latest) linkGap(latest, line);
+        sample(line); latest = line; lastSample = Date.now(); showTurnTest(line.turntest);
+      } else { event(line); stEvent(line); }
+      if (line.type && line.type.startsWith('turntest')) showTurnTest(null, line);
       if (line.type === 'ready' && $('drive-on').checked) {
         $('drive-on').checked = false; stopDrive();
         prompt(`Board RESET during drive (cause: ${line.reset_cause || 'unknown'}). Drive disabled. Check the battery is ON and charged.`);
@@ -341,7 +482,8 @@ async function poll() {
   $('age').textContent = age == null ? 'no data' : age < 2 ? 'live' : `stale ${age.toFixed(0)} s`;
   $('age').className = 'badge ' + (age != null && age < 2 ? 'ok' : 'bad');
   for (const id in charts) draw(id);
-  setTimeout(poll, 250);
+  showBuffer();
+  setTimeout(poll, 100);  // samples arrive at 5 Hz
 }
 document.querySelectorAll('button[data-c]').forEach(b => b.onclick = () =>
   fetch('/api/command', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ command:b.dataset.c }) }));
@@ -408,8 +550,8 @@ function setDirection(forward) {
 $('assign-clear').onclick = () => { if (!pickedPos) return; delete motorMap[pickedPos];
   try { localStorage.setItem('motorMap', JSON.stringify(motorMap)); } catch {}
   prompt(`Cleared ${POS[pickedPos].name}.`); spunMotor = pickedPos = null; renderWheels(); renderAssign(); };
-$('spin-buttons').innerHTML = [1, 2, 3, 4].map(m => `<button data-m="${m}" disabled>Spin M${m}</button>`).join('') +
-  '<span style="color:var(--mute)">configured wheels spin forward</span>';
+$('spin-buttons').innerHTML = [1, 2, 3, 4].map(m =>
+  `<button data-m="${m}" disabled title="Configured wheels spin forward">Spin M${m}</button>`).join('');
 document.querySelectorAll('#spin-buttons button').forEach(b => b.onclick = () => {
   spunMotor = Number(b.dataset.m);
   // A configured motor spins its wheel FORWARD; an unconfigured one spins raw "+".
@@ -439,7 +581,40 @@ function updateDriveControls() {
   const lifted = $('lifted').checked;
   document.querySelectorAll('#spin-buttons button').forEach(b => b.disabled = !lifted);
   $('drive-on').disabled = !mapComplete();
+  $('tt-start').disabled = !lifted || !mapComplete();
   if (!mapComplete() && $('drive-on').checked) { $('drive-on').checked = false; stopDrive(); }
+}
+// ---- Link test: on-board turn test + blackout detection ----------------------------
+$('tt-start').onclick = () => {
+  if ($('drive-on').checked) { $('drive-on').checked = false; held.clear(); clearInterval(driveTimer); driveTimer = null; }
+  // Turn in place (CCW, w = +1) through the wheel map; the firmware runs odd legs reversed.
+  const speed = Math.min(Number($('speed').value), 150), wheel = { FL:-1, FR:1, RL:-1, RR:1 }, out = [0, 0, 0, 0];
+  for (const p in wheel) out[motorMap[p].motor - 1] = motorMap[p].sign * speed * wheel[p];
+  lastSent = 'TURNTEST'; command('TURNTEST ' + out.join(' '));
+  mark(`turn test started: 4 x 180 deg there and back, PWM ${speed}`);
+  $('tt-state').textContent = 'starting…';
+};
+function showTurnTest(tt, event) {
+  const el = $('tt-state');
+  if (event) {
+    if (event.type === 'turntest_leg') el.textContent = `leg ${event.leg}/${event.of}: turned ${event.turned_deg}°`;
+    if (event.type === 'turntest_end') el.textContent = `${event.result.toUpperCase()} (${event.reason.replaceAll('_', ' ')}), ` +
+      `${event.legs_done}/${event.of} legs, Mega uptime ${(event.ms / 1000).toFixed(1)} s`;
+    if (event.type === 'turntest_end' || event.type === 'turntest_start') el.style.color = '';
+    return;
+  }
+  if (tt && tt.state === 'running' && !el.textContent.startsWith('leg')) el.textContent = `running, ${tt.legs_done}/${tt.of} legs done`;
+}
+// A gap between samples with the Mega's uptime still counting = the link dropped, not the board.
+function linkGap(prev, line) {
+  const gap = (new Date(line.received_at) - new Date(prev.received_at)) / 1000, uptime = (line.ms - prev.ms) / 1000;
+  if (gap < 2 || Date.now() - new Date(line.received_at) > 5000) return;  // skip old backlog on page load
+  const tt = line.turntest, during = tt && tt.state === 'running' ? `, turn test still running (${tt.legs_done}/${tt.of} legs)` :
+    tt && prev.turntest && tt.legs_done > prev.turntest.legs_done ? `, turn test advanced ${prev.turntest.legs_done}→${tt.legs_done} legs` : '';
+  const msg = `LINK GAP ${gap.toFixed(1)} s; Mega uptime kept counting (+${uptime.toFixed(1)} s, no reboot)${during}: ` +
+    `the Arduino stayed on, the link dropped`;
+  event({ seq: 0, received_at: new Date().toISOString(), note: msg }); mark(msg);
+  $('tt-state').textContent = msg; $('tt-state').style.color = 'var(--c1)';
 }
 function driveCommand() {
   const k = c => held.has(c) ? 1 : 0, speed = Number($('speed').value);
@@ -514,6 +689,145 @@ loadPorts(); setInterval(loadPorts, 5000);
 $('mark').onsubmit = e => { e.preventDefault(); const text = $('mark-text').value.trim(); if (!text) return;
   fetch('/api/mark', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ text }) });
   $('mark-text').value = ''; };
+// ---- Competition calibration captures ------------------------------------------------
+const CAL_ROWS = [['ldr_A0','LDR A0 (1st, left)',0],['ldr_A2','LDR A2 (2nd)',0],['ldr_A7','LDR A7 (3rd)',0],['ldr_A6','LDR A6 (4th, right)',0],
+  ['us_left_mm','Ultrasonic left 45° (mm)',0],['us_right_mm','Ultrasonic right 45° (mm)',0],['us_front_mm','Ultrasonic front (mm)',0],['us_side_left_mm','Ultrasonic left side (mm)',0],['us_side_right_mm','Ultrasonic right side (mm)',0],
+  ['color_red','Colour red',1],['color_green','Colour green',1],['color_blue','Colour blue',1],['color_clear','Colour clear',1],
+  ['color_rg_ratio','Colour R/G ratio',3],['angle_z','Gyro Z angle (°)',1],['rate_z','Gyro Z rate (°/s)',2]];
+let calPoses = {}, calLatest = {}, calBusy = false;
+function calRender() {
+  $('cal-steps').innerHTML = Object.entries(calPoses).map(([pose, label], i) => {
+    const c = calLatest[pose], cls = calBusy === pose ? 'busy' : c ? (c.warnings.length ? 'warned' : 'done') : '';
+    const sub = calBusy === pose ? 'recording… keep still' : c ? `${c.warnings.length ? '⚠ ' : '✓ '}${new Date(c.ended).toLocaleTimeString()} · ${c.samples_n} samples` +
+      (c.warnings.length ? ` · ${c.warnings.length} warning${c.warnings.length > 1 ? 's' : ''}` : '') + ' · click to redo' : 'not recorded';
+    return `<button data-pose="${pose}" class="${cls}" ${calBusy ? 'disabled' : ''}><b>${i + 1} · ${label}</b><span>${sub}</span></button>`;
+  }).join('');
+  document.querySelectorAll('[data-pose]').forEach(b => b.onclick = () => calCapture(b.dataset.pose));
+  const poses = Object.keys(calPoses);
+  const cell = (pose, key, d) => { const s = calLatest[pose] && calLatest[pose].stats[key];
+    return !s ? '—' : !s.n ? 'none' : `${Number(s.mean).toFixed(d)} <span class="hint">± ${Number(s.sd).toFixed(d)}</span>`; };
+  $('cal-table').innerHTML = `<tr><th>Mean ± SD</th>${poses.map(p => `<th>${calPoses[p]}</th>`).join('')}</tr>` +
+    CAL_ROWS.map(([key, name, d]) => `<tr><td>${name}</td>${poses.map(p => `<td>${cell(p, key, d)}</td>`).join('')}</tr>`).join('');
+}
+async function calLoad() {
+  try {
+    const r = await (await fetch('/api/captures')).json();
+    calPoses = r.poses; calLatest = {};
+    for (const c of r.captures) calLatest[c.pose] = c;   // file order: the last one per pose wins
+    $('cal-file').textContent = `All captures (with raw samples) are appended to ${r.file}. Accel, rates and every axis are in the file too.`;
+    calRender();
+  } catch {}
+}
+async function calCapture(pose) {
+  if (calBusy) return;
+  if (!lastSample || Date.now() - lastSample > 2000) { $('cal-status').textContent = 'No live data: connect to the robot first.'; return; }
+  calBusy = pose; calRender();
+  $('cal-status').textContent = `Recording ${calPoses[pose]} for 5 s… keep the robot and your hands still.`;
+  try {
+    const r = await fetch('/api/capture', { method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ pose, note:$('cal-note').value.trim() }) });
+    if (!r.ok) throw new Error(r.status === 409 ? 'another capture is running' : 'HTTP ' + r.status);
+    const c = await r.json(); calLatest[pose] = c; $('cal-note').value = '';
+    $('cal-status').textContent = c.warnings.length ? `${calPoses[pose]} saved with warnings: ${c.warnings.join('; ')}. Click it again to redo.`
+      : `${calPoses[pose]} saved (${c.samples_n} samples). ` + (Object.keys(calPoses).every(p => calLatest[p]) ? 'All three poses recorded.' : 'Move to the next pose.');
+  } catch (e) { $('cal-status').textContent = 'Capture failed: ' + e.message; }
+  calBusy = false; calRender();
+}
+calLoad();
+
+// ---- Tournament step test ---------------------------------------------------------------------
+// Each Run sends the wheel map, then one on-board step (GO / TURN) whose targets come from the
+// latest capture of its checkpoint; the Mega closes the loop. Capture keys: us_left_mm = left 45°,
+// us_right_mm = right 45°, us_front_mm, us_side_left_mm, us_side_right_mm.
+const ST_STEPS = { 1:{ pose:'p_point', mode:1 }, 2:{ pose:'centre', mode:2 } };
+let stTurn = null, stActive = null;   // stTurn: +90 / -90 chosen by 03, it picks 04's box
+function stRef(pose, key) { const c = calLatest[pose], st = c && c.stats['us_' + key + '_mm']; return st && st.n ? Math.round(st.mean) : null; }
+function stTargets(pose, mode) {
+  const l45 = stRef(pose, 'left'), r45 = stRef(pose, 'right'), front = stRef(pose, 'front');
+  const ls = stRef(pose, 'side_left'), rs = stRef(pose, 'side_right');
+  if (!calLatest[pose]) return { error: `no capture for ${calPoses[pose] || pose} yet` };
+  const lat = mode <= 2 ? (ls != null && rs != null ? ls - rs : null) : mode === 3 ? rs : ls;
+  if (lat == null) return { error: `${calPoses[pose]} capture has no ${mode <= 2 ? 'left+right side' : mode === 3 ? 'right side' : 'left side'} reading` };
+  const both45 = l45 != null && r45 != null;
+  if (front == null && !both45) return { error: `${calPoses[pose]} capture has no front or 45° readings` };
+  return { front: front || 0, lat, h45: both45 ? l45 - r45 : 0, mean45: both45 ? Math.round((l45 + r45) / 2) : 0 };
+}
+function stErrors(t, mode, us) {   // the same errors the firmware computes; null = not measurable
+  const ok = i => us[i] > 0, [l45, r45, front, ls, rs] = us;
+  const ex = t.front && ok(2) ? front - t.front : t.mean45 && ok(0) && ok(1) ? (l45 + r45) / 2 - t.mean45 : null;
+  const ey = mode <= 2 ? (ok(3) && ok(4) ? ((ls - rs) - t.lat) / 2 : null) : mode === 3 ? (ok(4) ? -(rs - t.lat) : null) : (ok(3) ? ls - t.lat : null);
+  return { ex, ey, eh: ok(0) && ok(1) ? (l45 - r45) - t.h45 : null };
+}
+const stMm = v => v == null ? '—' : `${v > 0 ? '+' : ''}${Math.round(v)} mm`;
+function stLocate(s) {
+  const us = [0, 1, 2, 3, 4].map(i => s.ultrasonic_mm[i] ?? -1), names = ['L45', 'R45', 'front', 'L side', 'R side'];
+  const lines = [`sees: ${names.map((n, i) => `${n} ${us[i] > 0 ? us[i] : '✗'}`).join(' · ')}`];
+  const rows = [['P', 'p_point', 1], ['N', 'centre', 2]];
+  if (stTurn) rows.push([stTurn > 0 ? 'left box' : 'right box', stTurn > 0 ? 'left_box' : 'right_box', stTurn > 0 ? 3 : 4]);
+  for (const [label, pose, mode] of rows) {
+    const t = stTargets(pose, mode);
+    if (t.error) { lines.push(`to ${label}: ${t.error}`); continue; }
+    const e = stErrors(t, mode, us);
+    lines.push(`to ${label}: forward ${stMm(e.ex)} · sideways ${stMm(e.ey)} (left +)` + (mode <= 2 ? ` · 45° asym ${stMm(e.eh)}` : ''));
+  }
+  const step = s.step || (latest && latest.step) || {}, g = s.gyro || {};
+  lines.push(`colour ${colour ? `${colour.name} ${Math.round(100 * colour.confidence)}%` : '—'} · yaw ${step.yaw_deg ?? '—'}° · ` +
+    `square heading ${step.square ? 'stored' : 'not yet (run 01)'} · gyro ${g.bias_valid === 0 ? 'NOT ZEROED' : 'ok'}`);
+  $('st-locate').innerHTML = lines.join('<br>');
+}
+function stCard(n, cls, text) {
+  $('st-c' + n).className = 'st-card' + (cls ? ' ' + cls : '');
+  if (text != null) $('st-s' + n).textContent = text;
+}
+function stReady() {
+  if (!lastSample || Date.now() - lastSample > 2000) return 'No live data from the robot: connect first.';
+  if (!mapComplete()) return 'Identify all four wheels first (Motors panel, step 1).';
+  if (!$('lifted').checked) return 'Tick "Wheels lifted / area clear" in the Motors panel.';
+  const g = latest && latest.gyro;
+  if (!g || g.bias_valid === 0) return 'The gyro is not zeroed yet: keep the robot still for 2 s.';
+  return null;
+}
+function stRun(n, stepCommand) {
+  if ($('drive-on').checked) { $('drive-on').checked = false; held.clear(); clearInterval(driveTimer); driveTimer = null; }
+  const wmap = 'WMAP ' + ['FL', 'FR', 'RL', 'RR'].map(p => `${motorMap[p].motor} ${motorMap[p].sign}`).join(' ');
+  stActive = n; stCard(n, 'running', `running… (${stepCommand})`); $('st-msg').textContent = '';
+  lastSent = stepCommand;   // so the next Space / STOP is always sent
+  command(wmap).then(() => command(stepCommand));
+  mark(`step ${String(n).padStart(2, '0')} run: ${stepCommand}`);
+}
+function stPower() { const max = Math.min(Number($('speed').value), 150); return [max, Math.min(Number($('st-min').value), max)]; }
+function stGo(n) {
+  const why = stReady(); if (why) { $('st-msg').textContent = why; return; }
+  const { pose, mode } = ST_STEPS[n] || { pose: stTurn > 0 ? 'left_box' : 'right_box', mode: stTurn > 0 ? 3 : 4 };
+  const t = stTargets(pose, mode); if (t.error) { $('st-msg').textContent = `Step ${n}: ${t.error}. Record it in the calibration panel.`; return; }
+  const [max, min] = stPower();
+  stRun(n, `GO ${mode} ${t.front} ${t.lat} ${t.h45} ${max} ${t.mean45} ${min}`);
+}
+$('st-r1').onclick = () => stGo(1);
+$('st-r2').onclick = () => stGo(2);
+$('st-r3').onclick = () => {
+  const why = stReady(); if (why) { $('st-msg').textContent = why; return; }
+  if (!colour || colour.confidence < 0.5) { $('st-msg').textContent = 'Colour unclear: the robot must be over the red or green paper (confidence ≥ 50%).'; return; }
+  stTurn = colour.name === 'GREEN' ? 90 : -90;
+  const [max, min] = stPower();
+  stRun(3, `TURN ${stTurn} ${max} ${min}`);
+  $('st-s3').textContent = `${colour.name} → turning ${stTurn > 0 ? 'left' : 'right'} 90°…`;
+};
+$('st-r4').onclick = () => { if (!stTurn) { $('st-msg').textContent = 'Run 03 first: the turn decides which box.'; return; } stGo(4); };
+$('st-stop').onclick = () => { stopDrive(true); $('st-msg').textContent = 'STOP sent.'; };
+$('st-min').oninput = () => $('st-min-v').textContent = $('st-min').value;
+function stEvent(line) {
+  if (line.error && /STEP|BAD_GO|BAD_TURN|BAD_WMAP/.test(line.error) && stActive) {
+    stCard(stActive, 'aborted', `refused by the robot: ${line.error}`); stActive = null; return;
+  }
+  if (line.type !== 'step_end' || !stActive) return;
+  const n = stActive; stActive = null;
+  const ok = line.result === 'reached', why = line.reason.replaceAll('_', ' ');
+  const err = line.kind === 'turn' ? `heading error ${line.yaw_err_deg}°, yaw ${line.yaw_deg}°`
+    : `forward ${line.ex_mm} mm, sideways ${line.ey_mm} mm` + (line.mode === 1 ? `, 45° asym ${line.eh45_mm} mm` : '') + `, heading error ${line.yaw_err_deg}°`;
+  stCard(n, ok ? 'reached' : 'aborted', `${ok ? '✓ reached' : `✗ aborted (${why})`}: ${err}` + (n === 1 && ok ? ' · square heading stored' : ''));
+}
+
 poll();
 </script>
 </body>

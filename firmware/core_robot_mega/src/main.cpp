@@ -380,6 +380,13 @@ void loop() {
   readPort(bluetooth,1);
 #endif
   sensorsUpdate(); s=sensorsRead();
+  static const char* gyroAnnounced=nullptr;
+  if(sensorsGyroState()!=gyroAnnounced) {  // e.g. "# GYRO_ZEROING_HOLD_STILL", then "# GYRO_ZEROED"
+    gyroAnnounced=sensorsGyroState(); reply(usb,gyroAnnounced);
+#if BLUETOOTH_UART != 0
+    reply(bluetooth,gyroAnnounced);
+#endif
+  }
   uint8_t beforeSurvey=survey.count();
   if(!stopped()&&survey.busy()) survey.end();
   if(survey.update(millis(),s)) {

@@ -9,14 +9,15 @@ const uint8_t MPU_ACCEL_XOUT=0x3b,MPU_GYRO_XOUT=0x43,MPU_USER_CTRL=0x6a,MPU_PWR_
 const uint8_t MPU_FIFO_COUNT=0x72,MPU_FIFO_RW=0x74,MPU_WHO_AM_I=0x75;
 const uint8_t MPU_FIFO_GYRO_BIT[3]={0x40,0x20,0x10}; // XG, YG, ZG in FIFO_EN.
 const uint8_t MPU_INT_FIFO_OVERFLOW=0x10,MPU_INT_DATA_READY=0x01;
-const uint8_t MPU_SAMPLE_DIVIDER=9;           // 1 kHz DLPF clock / (1+9).
-const float MPU_SAMPLE_HZ=100.0f;
+const uint8_t MPU_SAMPLE_DIVIDER=4;           // 1 kHz DLPF clock / (1+4).
+const float MPU_SAMPLE_HZ=200.0f;            // Every sample is buffered in the FIFO and integrated.
+const uint16_t MPU_ZERO_SAMPLES=400;          // 2 s bias window.
 const float MPU_GYRO_LSB_PER_DPS=65.5f;       // GYRO_CONFIG FS_SEL=1: +/-500 deg/s.
 const int16_t MPU_SATURATION=32700;
 const uint16_t MPU_FIFO_BYTES_MIN=512;        // MPU6500 family; MPU6050 has 1024.
 
 struct MpuWrite { uint8_t reg,value; };
-// Wake on the gyro PLL, 100 Hz samples, ~44 Hz DLPF, +/-500 deg/s.
+// Wake on the gyro PLL, 200 Hz samples, ~44 Hz DLPF, +/-500 deg/s.
 // INT is active-high push-pull, latched until any register read.
 const MpuWrite MPU_SETUP[]={
   {MPU_PWR_MGMT_1,0x01},{MPU_SMPLRT_DIV,MPU_SAMPLE_DIVIDER},{MPU_CONFIG,0x03},
