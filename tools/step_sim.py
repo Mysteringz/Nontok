@@ -8,8 +8,12 @@ Run: python3 tools/step_sim.py
 """
 import math
 
-W, BACK, MAXR = 750.0, 2000.0, 3000.0
-SIDE_FROM = {-W: 1000.0, W: 700.0}   # like the field at P: the right wall reaches it, the left does not
+# Arena from the 27 Oct captures: side walls 1,550 mm apart, back wall 412 mm past N, P 733 mm before N,
+# parking boxes level with the middle (colour) box.
+# Both side walls run from the back wall to just short of N, so the side sensors see nothing at P.
+N_Y = 1650.0
+W, BACK, MAXR = 775.0, N_Y + 412, 3000.0
+WALL_START = N_Y - 150               # side walls end here, a little before N, the same on both sides
 MOUNTS = [(150, 95, 45), (150, -95, -45), (150, 0, 0), (0, 115, 90), (0, -115, -90)]  # fwd, left, deg
 GYRO_SCALE_ERROR = 0.97              # simulated gyro reads 3 % short: worse than the real 0.9 %
 NO_REF = 9999
@@ -25,7 +29,7 @@ def ray(px, py, ang):
     for wx in (-W, W):
         if abs(dx) > 1e-9:
             t = (wx - px) / dx
-            if t > 0 and SIDE_FROM[wx] <= py + dy * t <= BACK:
+            if t > 0 and WALL_START <= py + dy * t <= BACK:
                 best = min(best, t)
     return best
 
@@ -53,6 +57,7 @@ def clamp(v, a, b):
 class Robot:
     def __init__(self, x, y, psi):
         self.x, self.y, self.psi, self.rate, self.t = x, y, psi, 0.0, 0.0
+        self.phase = ""   # current controller phase, for tracing and animation
 
     def yaw(self):  # what the gyro reports, scale error included
         return math.degrees(self.psi) * GYRO_SCALE_ERROR
@@ -83,6 +88,7 @@ def go(r, ref, target, creep, probe, maxpwm=120, minpwm=55):
     sums = {}
     probe_base = target
     while r.t - start < 40:
+        r.phase = phase
         fresh = int(r.t / 0.1) != last_us
         if fresh:
             last_us = int(r.t / 0.1)
@@ -172,6 +178,7 @@ def go(r, ref, target, creep, probe, maxpwm=120, minpwm=55):
 
 def turn(r, target, maxpwm=120, minpwm=55):
     start, settled_at = r.t, None
+    r.phase = "turn"
     while r.t - start < 10:
         e = target - r.yaw()
         coast = e * r.rate > 0 and abs(e) < abs(r.rate) * 0.06
@@ -186,9 +193,9 @@ def turn(r, target, maxpwm=120, minpwm=55):
     return False
 
 
-P, N = (0, 900, 0.0), (0, 1650, 0.0)
-TURNED = {90: (0, 1650, math.radians(90)), -90: (0, 1650, math.radians(-90))}
-BOX = {90: (-480, 1780, math.radians(90)), -90: (480, 1780, math.radians(-90))}
+P, N = (0, N_Y - 733, 0.0), (0, N_Y, 0.0)
+TURNED = {90: (0, N_Y, math.radians(90)), -90: (0, N_Y, math.radians(-90))}
+BOX = {90: (-(W - 215), N_Y, math.radians(90)), -90: (W - 215, N_Y, math.radians(-90))}  # level with the middle box, 215 mm off the side wall
 
 if __name__ == "__main__":
     print("readings at P:", sense(*P), " N:", sense(*N), " turned L:", sense(*TURNED[90]), " box L:", sense(*BOX[90]))
