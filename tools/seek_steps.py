@@ -896,6 +896,10 @@ def main():
                 raise Abort("colour unclear")
             turn = "left" if name == "GREEN" else "right"
             seeker.turn_to("turned_" + turn, cal, ccw=turn == "left")
+            us = seeker.seek("03", "turned_" + turn, cal, tol=40, heading=False)
+            # Square up before the drive into the box, so a twist carried from P/N cannot turn into
+            # sideways drift over the ~56 cm approach (the box squares again at the end).
+            us = seeker.square_to_beams(seeker.refs("turned_" + turn, cal), us)
             seeker.seek("03", "turned_" + turn, cal, tol=40, heading=False)
         if first <= 4 <= last:
             if turn is None:
