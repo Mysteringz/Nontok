@@ -661,57 +661,61 @@ class Seeker:
             raise Abort("P not found along its line (match %d): stopping rather than wandering" % best)
         return self.fine_p(ref)
 
-    def fine_p(self, ref, done=40, tries=16):
-        """Fine P on the two 45 deg beams, over sideways position AND heading (the wall sweep
-        finds square only to ~+/-5 deg, and a twist moves the two beams differently, which no
-        strafe can fix). Trial moves: short strafe left/right, 5 deg turn either way; keep a
-        move that improves the beam match by > 8 mm, otherwise undo it and try the next kind.
-        Stops when no move helps or the match is under `done` (each beam ~20 mm off)."""
-        def beams_match():
-            for _ in range(3):   # a missing or jumpy beam: look again rather than judge
+    def fine_p(self, ref, done=60, moves=20):
+        """Fine P on the two 45 deg beams. Errors eL, eR = reading - P's. Their difference
+        s = eL - eR says which way to strafe: a strafe right lengthens the left beam and shortens
+        the right (field, 30 Oct), so s < 0 means strafe right. If s is small but both beams are
+        off the same way, it is distance (front) or heading: fix the front, then try 5 deg turns.
+        P only when eL and eR are within ~30 mm each (|eL| + |eR| <= `done`); otherwise stop
+        and report rather than go on to N with the wrong start."""
+        def look():
+            for _ in range(3):   # a missing beam: look again rather than judge
                 u, _ = self.link.measure()
-                l, r = u[IDX["left"]], u[IDX["right"]]
-                if l > 0 and r > 0:
-                    return abs(l - ref["left"]) + abs(r - ref["right"]), u
-            return None, u
-        def strafe(d, ms=160):
-            self.link.pulse(0, d * 100, self.wcomp.get(("y", d), 0), PWM["y"], ms)
-            self.link.measure()
-            self.hold(None)
-        def turn(deg):
-            self.goal += deg
+                if u[IDX["left"]] > 0 and u[IDX["right"]] > 0:
+                    return u
+            return u
+        us = look()
+        ms, last_s, turn_try = 200, None, 5
+        for move in range(moves):
+            l, r, f = us[IDX["left"]], us[IDX["right"]], us[IDX["front"]]
+            if l <= 0 or r <= 0:
+                raise Abort("fine P: a 45 deg beam sees nothing")
+            el, er = l - ref["left"], r - ref["right"]
+            sig, match = el - er, abs(el) + abs(er)
+            print("  P fine #%02d: beams %d/%d (P %d/%d) errors %+d/%+d, difference %+d, front %d" % (
+                move, l, r, ref["left"], ref["right"], el, er, sig, f), flush=True)
+            self.link.record(kind="fine_p", move=move, us=us, el=el, er=er, sig=sig)
+            if match <= done:
+                print("  at P (both beams within ~30 mm)", flush=True)
+                return us
+            if f > 0 and abs(f - ref["front"]) > 30:
+                _, us = self.translate("x", f - ref["front"])
+                us = self.hold(us)
+                continue
+            if abs(sig) > 30:
+                d = -1 if sig < 0 else 1   # + = strafe left
+                if last_s is not None and abs(sig - last_s) < 8:
+                    ms = min(300, ms + 40)   # did not move: push longer
+                elif abs(sig) < 120:
+                    ms = 140
+                self.link.pulse(0, d * 100, self.wcomp.get(("y", d), 0), PWM["y"], ms)
+                self.link.measure()
+                us, last_s = look(), sig
+                us = self.hold(us)
+                continue
+            # Both beams off the same way: heading. Try a 5 deg turn; keep it if the match improves.
+            self.goal += turn_try
             self.rotate_to(self.goal, tol=2, strict=False)
-        moves = [("strafe left", lambda: strafe(1), lambda: strafe(-1)),
-                 ("strafe right", lambda: strafe(-1), lambda: strafe(1)),
-                 ("turn left 5", lambda: turn(5), lambda: turn(-5)),
-                 ("turn right 5", lambda: turn(-5), lambda: turn(5))]
-        best, us = beams_match()
-        if best is None:
-            raise Abort("fine P: the 45 deg beams do not see P's surfaces")
-        print("01 fine on beams and heading: match %d" % best, flush=True)
-        i = failed = 0
-        for _ in range(tries):
-            if best <= done or failed >= len(moves):
-                break
-            name, do, undo = moves[i]
-            do()
-            m, u = beams_match()
-            ok = m is not None and m < best - 8
-            print("  try %-12s match %s (best %d) %s" % (name, "-" if m is None else int(m), best, "keep" if ok else "undo"), flush=True)
-            self.link.record(kind="fine_p", move=name, match=m, best=best, us=u, kept=ok)
-            if ok:
-                best, us, failed = m, u, 0   # same move again next
+            u = look()
+            m2 = abs(u[IDX["left"]] - ref["left"]) + abs(u[IDX["right"]] - ref["right"]) if u[IDX["left"]] > 0 and u[IDX["right"]] > 0 else 9999
+            if m2 < match - 8:
+                us = u
             else:
-                undo()
-                failed += 1
-                i = (i + 1) % len(moves)
-        _, us = beams_match()
-        if us[IDX["front"]] > 0 and abs(us[IDX["front"]] - ref["front"]) > 30:
-            _, us = self.translate("x", us[IDX["front"]] - ref["front"])
-            us = self.hold(us)
-        print("  at P: front %d (P %d), beams %d/%d (P %d/%d), match %d" % (us[IDX["front"]], ref["front"], us[IDX["left"]],
-              us[IDX["right"]], ref["left"], ref["right"], best), flush=True)
-        return us
+                self.goal -= turn_try
+                self.rotate_to(self.goal, tol=2, strict=False)
+                us, turn_try = look(), -turn_try
+        raise Abort("P not reached in %d moves (beams %d/%d vs P %d/%d): not going on to N" % (
+            moves, us[IDX["left"]], us[IDX["right"]], ref["left"], ref["right"]))
 
     def turn_to(self, target, cal, ccw):
         """The colour turn: 90 deg from the held heading (or the current one) on the gyro."""
