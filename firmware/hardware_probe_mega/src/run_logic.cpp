@@ -298,63 +298,84 @@ bool Runner::seek(Pose pose, bool creep, float tol, int16_t us[NUS]) {
   return fail(RL_F("checkpoint_not_reached"));
 }
 
-// Step 01 from wherever it was placed (pointing at the main wall): minimise the mismatch of the
-// three forward sensors with P's readings (each capped at 300 mm, missing = 300). Forward/back
-// directly from the front; sideways and heading by trial moves kept only if the mismatch drops
-// by > 8 mm; steps shrink when nothing helps. P at mismatch <= 75, otherwise stop.
-bool Runner::descendP(bool turns, int16_t us[NUS]) {
-  const int16_t* ref = cal.ref[P];
-  static const uint8_t KEYS[3] = {FRONT, L45, R45};
-  float e[3], e2[3];
-  bool h[3], h2[3];
-  float cost, cost2;
+// Match a checkpoint on every sensor it has a target for (N: all five; P: front and the 45s):
+// mismatch = sum of |reading - target|, each capped at 300 mm (a missing echo counts 300), so one
+// sensor seeing something else cannot dominate. Forward/back directly from the front sensor;
+// sideways and heading by trial moves (strafe left/right, turn on the gyro) kept only if the
+// mismatch drops by > 8 mm; steps shrink when nothing helps. Done at ~25 mm a sensor; otherwise
+// stop rather than go on from the wrong place.
+bool Runner::descend(Pose pose, bool turns, int16_t us[NUS]) {
+  const int16_t* ref = cal.ref[pose];
+  bool key[NUS];
+  uint8_t nkeys = 0;
+  for (uint8_t k = 0; k < NUS; ++k) { key[k] = ref[k] != NONE; nkeys += key[k]; }
+  if (!key[FRONT]) return fail(RL_F("checkpoint_has_no_front_target"));
+  float e[NUS], e2[NUS], cost, cost2;
+  bool h[NUS], h2[NUS];
   int16_t u2[NUS];
   #define LOOK(U, E, H, C) do {                                                      \
       for (uint8_t t_ = 0; t_ < 3; ++t_) {                                           \
         TRY(measure(U));                                                             \
-        if (U[FRONT] > 0 && U[L45] > 0 && U[R45] > 0) break;                         \
+        bool all_ = true;                                                            \
+        for (uint8_t k_ = 0; k_ < NUS; ++k_) if (key[k_] && U[k_] <= 0) all_ = false;  \
+        if (all_) break;                                                             \
       }                                                                              \
       C = 0;                                                                         \
-      for (uint8_t i_ = 0; i_ < 3; ++i_) {                                           \
-        H[i_] = U[KEYS[i_]] > 0;                                                     \
-        E[i_] = float(U[KEYS[i_]] - ref[KEYS[i_]]);                                  \
-        C += H[i_] ? (fabsf(E[i_]) < 300 ? fabsf(E[i_]) : 300) : 300;                \
+      for (uint8_t k_ = 0; k_ < NUS; ++k_) {                                         \
+        H[k_] = U[k_] > 0;                                                           \
+        E[k_] = float(U[k_] - ref[k_]);                                              \
+        if (key[k_]) C += H[k_] ? (fabsf(E[k_]) < 300 ? fabsf(E[k_]) : 300) : 300;    \
       }                                                                              \
     } while (0)
-  float yMs = 300, wDeg = 8;
+  float yMs = 300, wDeg = 8, lastTurn = 8;
   LOOK(us, e, h, cost);
-  io.event(RL_F("p_start"), i16(cost), turns);
+  io.event(RL_F("match_start"), pose, i16(cost), turns);
   int8_t keep = -1;   // the trial that last helped: try it first again
-  float lastTurn = 8;   // the size of the last trial turn, for its undo
   for (uint8_t move = 0; move < 40; ++move) {
-    if (cost <= 75) {
-      io.event(RL_F("p_reached"), i16(cost), i16(e[0]), i16(e[1]), i16(e[2]));
+    if (cost <= 25.0f * nkeys) {
+      io.event(RL_F("match_reached"), pose, i16(cost), i16(e[FRONT]));
       return true;
     }
-    // Forward/back from the front sensor, but never a long reverse: a front reading far shorter
-    // than P's from the start means the beam is on something else (simulation: it backed out of
-    // the sector on a side wall). Then the trials below are used instead.
-    // While the 45 deg beams are useless (missing or >= 250 mm off, so capped in the mismatch),
-    // the robot is most likely turned away from square: turns first, forward only if far off
-    // (simulation: forward moves on an oblique front beam backed it diagonally away).
-    bool beamsBad = !(h[1] && h[2]) || fabsf(e[1]) >= 250 || fabsf(e[2]) >= 250;
-    if (h[0] && fabsf(e[0]) > (beamsBad && turns ? 150 : 30) && e[0] > -250) {
-      TRY(translate(0, e[0], us));
+    // Both side walls seen with the capture's spacing: the sideways offset is measured, not
+    // guessed (simulation: 28 cm off at N, both sides "useless" to the trials, so it only turned).
+    if (key[LSIDE] && key[RSIDE] && h[LSIDE] && h[RSIDE] &&
+        fabsf(float((us[LSIDE] + us[RSIDE]) - (ref[LSIDE] + ref[RSIDE]))) <= 100) {
+      float ey = ((us[LSIDE] - us[RSIDE]) - (ref[LSIDE] - ref[RSIDE])) / 2.0f;
+      if (fabsf(ey) > 30) {
+        TRY(translate(1, ey, us));
+        TRY(hold(us));
+        LOOK(us, e, h, cost);
+        io.event(RL_F("match_sideways"), pose, i16(cost), i16(ey));
+        continue;
+      }
+    }
+    // Sideways signal: the side walls when the checkpoint has both and both are seen, else the
+    // 45 deg pair. Either way a strafe right lengthens the left reading and shortens the right.
+    bool sides = key[LSIDE] && key[RSIDE] && h[LSIDE] && h[RSIDE];
+    uint8_t l = sides ? LSIDE : L45, r = sides ? RSIDE : R45;
+    bool pair = key[l] && key[r] && h[l] && h[r];
+    bool pairBad = !pair || fabsf(e[l]) >= 250 || fabsf(e[r]) >= 250;
+    // While the pair is useless the robot is most likely turned away: turns first, forward only
+    // if far off. Never a long reverse on a short front reading (it may be another surface).
+    if (h[FRONT] && fabsf(e[FRONT]) > (pairBad && turns ? 150 : 30) && e[FRONT] > -250) {
+      TRY(translate(0, e[FRONT], us));
       TRY(hold(us));
       LOOK(us, e, h, cost);
-      io.event(RL_F("p_forward"), i16(cost), i16(e[0]));
+      io.event(RL_F("match_forward"), pose, i16(cost), i16(e[FRONT]));
       continue;
     }
     // Trials: 0 strafe left, 1 strafe right, 2 turn CCW, 3 turn CW.
+    bool beams = key[L45] && key[R45] && h[L45] && h[R45];
+    bool twisted = beams && (e[L45] > 0) == (e[R45] > 0) &&
+                   (fabsf(e[L45]) < fabsf(e[R45]) ? fabsf(e[L45]) : fabsf(e[R45])) > 20;
     uint8_t order[4], n = 4;
-    bool both = h[1] && h[2];
     if (!turns) {
       n = 2;
-      order[0] = both && e[1] - e[2] < 0 ? 1 : 0;   // strafe right lengthens the left beam
+      order[0] = pair && e[l] - e[r] < 0 ? 1 : 0;
       order[1] = 1 - order[0];
-    } else if (beamsBad || (both && (e[1] > 0) == (e[2] > 0) && (fabsf(e[1]) < fabsf(e[2]) ? fabsf(e[1]) : fabsf(e[2])) > 20)) {
-      order[0] = 2; order[1] = 3; order[2] = 0; order[3] = 1;   // both off the same way: heading
-    } else if (both && e[1] - e[2] < 0) {
+    } else if (pairBad || twisted) {
+      order[0] = 2; order[1] = 3; order[2] = 0; order[3] = 1;
+    } else if (e[l] - e[r] < 0) {
       order[0] = 1; order[1] = 0; order[2] = 2; order[3] = 3;
     } else {
       order[0] = 0; order[1] = 1; order[2] = 2; order[3] = 3;
@@ -373,8 +394,7 @@ bool Runner::descendP(bool turns, int16_t us[NUS]) {
           TRY(measure(u2));
           TRY(hold(u2));
         } else {
-          float deg = beamsBad && pass == 0 ? 15 : wDeg;   // coarse turns while far from square
-          if (pass == 1) deg = lastTurn;
+          float deg = pass == 1 ? lastTurn : (pairBad ? 15 : wDeg);   // coarse while far off
           lastTurn = deg;
           goal += ccw ? deg : -deg;
           TRY(rotateTo(goal, 2, false));
@@ -382,7 +402,7 @@ bool Runner::descendP(bool turns, int16_t us[NUS]) {
         if (pass == 1) break;
         LOOK(u2, e2, h2, cost2);
         bool ok = cost2 < cost - 8;
-        io.event(RL_F("p_try"), t, i16(cost), i16(cost2), ok);
+        io.event(RL_F("match_try"), t, i16(cost), i16(cost2), ok);
         if (ok) {
           memcpy(us, u2, sizeof(u2));
           memcpy(e, e2, sizeof(e));
@@ -403,44 +423,69 @@ bool Runner::descendP(bool turns, int16_t us[NUS]) {
     }
   }
   #undef LOOK
-  return fail(RL_F("P_not_reached"));
+  return fail(RL_F("checkpoint_match_not_reached"));
 }
 
-// Heading at P: the three-sensor match can hide a twist. Near P the front faces the main wall
-// dead on: sweep +/-30 deg; square = middle of the contiguous readings within 30 mm of the least.
-bool Runner::squareAtP() {
+// Start: drive forward about `mm` on the held start heading (the robot is placed facing the main
+// wall), in short moves, never closer than 150 mm short of N's front reading.
+bool Runner::approach(int16_t mm, int16_t us[NUS]) {
+  for (uint8_t t = 0; t < 3; ++t) { TRY(measure(us)); if (us[FRONT] > 0) break; }
+  if (us[FRONT] <= 0) return fail(RL_F("approach_front_sees_nothing"));
+  int16_t target = us[FRONT] - mm, nearest = cal.ref[N][FRONT] + 150;
+  if (target < nearest) target = nearest;
+  io.event(RL_F("approach"), us[FRONT], target);
+  for (uint8_t move = 0; move < 8; ++move) {
+    if (us[FRONT] > 0 && us[FRONT] - target <= 25) return true;
+    if (us[FRONT] <= 0) { TRY(measure(us)); continue; }
+    TRY(translate(0, us[FRONT] - target, us));
+    TRY(hold(us));
+  }
+  return true;   // best effort: the N match takes over from wherever it got
+}
+
+// Square to the main wall where the robot is (it faces the wall within ~30 deg): sweep +/-40 deg;
+// square = middle of the contiguous front readings within 30 mm of the least near the middle.
+// The wide beam cone makes a match on readings alone able to hide a twist.
+bool Runner::squareHere() {
   int16_t us[NUS];
   TRY(measure(us));
   float y0, y;
   if (!io.yaw(&y0)) return fail(RL_F("gyro_not_valid"));
-  TRY(rotateTo(y0 - 30, 4, true));
-  float yaws[16];
-  int16_t fronts[16];
+  TRY(rotateTo(y0 - 40, 4, true));
+  float yaws[20];
+  int16_t fronts[20];
   uint8_t n = 0;
-  for (uint8_t i = 0; i < 16; ++i) {
+  for (uint8_t i = 0; i < 20; ++i) {
     TRY(measure(us));
     if (!io.yaw(&y)) return fail(RL_F("gyro_lost_data_in_sweep"));
     if (us[FRONT] > 0) { yaws[n] = y; fronts[n] = us[FRONT]; ++n; }
-    io.event(RL_F("p_sweep"), i16((y - y0) * 10), us[FRONT]);
-    if (y >= y0 + 30) break;
+    io.event(RL_F("sweep"), i16((y - y0) * 10), us[FRONT]);
+    if (y >= y0 + 40) break;
     float y1;
     bool turned;
     TRY(rotatePulse(+1, y, us, &y1, &turned));
   }
-  if (n < 4) return fail(RL_F("sweep_at_P_saw_no_wall"));
-  // The least reading within +/-22 deg of where the match left the robot (within ~15 deg of
-  // square): at the sweep's ends the beam cone can catch a side wall and read shorter (simulation).
-  int8_t best = -1;
-  for (uint8_t j = 0; j < n; ++j)
-    if (fabsf(yaws[j] - y0) <= 22 && (best < 0 || fronts[j] < fronts[best])) best = int8_t(j);
-  if (best < 0) return fail(RL_F("sweep_at_P_saw_no_wall_ahead"));
-  uint8_t i = uint8_t(best);
-  int16_t least = fronts[i];
-  uint8_t lo = i, hi = i;
-  while (lo > 0 && fronts[lo - 1] <= least + 30) --lo;
-  while (hi + 1 < n && fronts[hi + 1] <= least + 30) ++hi;
+  if (n < 4) return fail(RL_F("sweep_saw_no_wall"));
+  // Flat stretches: neighbouring front readings within 30 mm. The main wall, seen square, gives
+  // the widest one (the beam cone keeps it flat over ~25 deg); a side wall's end gives a short,
+  // sloping one that can read closer (simulation: "least reading" picked one, 30 deg off).
+  // Take the widest stretch whose middle is within 35 deg of where the robot started the sweep.
+  int8_t bestLo = -1, bestHi = -1;
+  for (uint8_t a = 0; a < n;) {
+    uint8_t b = a;
+    while (b + 1 < n && fabsf(float(fronts[b + 1] - fronts[b])) <= 30) ++b;
+    float mid = (yaws[a] + yaws[b]) / 2 - y0;
+    bool better = bestLo < 0 || b - a > bestHi - bestLo ||
+                  (b - a == bestHi - bestLo && fabsf(mid) < fabsf((yaws[bestLo] + yaws[bestHi]) / 2 - y0));
+    if (fabsf(mid) <= 35 && b > a && better) { bestLo = int8_t(a); bestHi = int8_t(b); }
+    a = b + 1;
+  }
+  if (bestLo < 0) return fail(RL_F("sweep_saw_no_wall_ahead"));
+  uint8_t lo = uint8_t(bestLo), hi = uint8_t(bestHi);
+  int16_t least = fronts[lo];
+  for (uint8_t j = lo; j <= hi; ++j) if (fronts[j] < least) least = fronts[j];
   float normal = (yaws[lo] + yaws[hi]) / 2;
-  io.event(RL_F("p_square"), i16((normal - y0) * 10), least, i16((yaws[lo] - y0) * 10), i16((yaws[hi] - y0) * 10));
+  io.event(RL_F("square"), i16((normal - y0) * 10), least, i16((yaws[lo] - y0) * 10), i16((yaws[hi] - y0) * 10));
   setGoal(normal);
   return rotateTo(normal, 2, false);
 }
@@ -511,15 +556,18 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
   if (!io.yaw(&y)) return fail(RL_F("gyro_not_zeroed"));
   setGoal(y);   // placed pointing at the wall: hold this heading until P squares it
   if (first <= 1 && last >= 1) {
+    // P is skipped (only the front sees the main wall from there, so its sideways position and
+    // heading were never reliable): forward ~30 cm, then square to the wall from closer in.
     io.event(RL_F("step"), 1);
-    TRY(descendP(true, us));
-    TRY(squareAtP());
-    TRY(descendP(false, us));
+    TRY(approach(300, us));
+    TRY(squareHere());
   }
   if (first <= 2 && last >= 2) {
+    // N: all five sensors see real surfaces (main wall, both side walls), so match them all.
     io.event(RL_F("step"), 2);
-    TRY(seek(N, false, 20, us));
-    TRY(squareToBeams(N, us));   // the twist carried from P
+    TRY(descend(N, true, us));
+    TRY(squareHere());
+    TRY(descend(N, false, us));
     TRY(seek(N, false, 20, us));
   }
   turnDir = forceTurn;

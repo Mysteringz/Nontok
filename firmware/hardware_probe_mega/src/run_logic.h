@@ -44,7 +44,7 @@ class Io {
 class Runner {
  public:
   Runner(Io& io, const Calib& cal);
-  // Steps first..last (1 P, 2 N, 3 colour turn, 4 park). forceTurn +1/-1 picks the box when
+  // Steps first..last (1 approach + square to the wall, 2 match N, 3 colour turn, 4 park). forceTurn +1/-1 picks the box when
   // step 3 is skipped. false: stopped; reason() says why (RL_F string).
   bool run(uint8_t first = 1, uint8_t last = 4, int8_t forceTurn = 0);
   const char* reason() const { return why; }
@@ -74,8 +74,9 @@ class Runner {
   bool rotatePulse(int8_t dir, float y0, int16_t us[NUS], float* y1, bool* turned);
   bool seek(Pose pose, bool creep, float tol, int16_t us[NUS]);
   bool squareToBeams(Pose pose, int16_t us[NUS]);
-  bool descendP(bool turns, int16_t us[NUS]);
-  bool squareAtP();
+  bool descend(Pose pose, bool turns, int16_t us[NUS]);
+  bool approach(int16_t mm, int16_t us[NUS]);
+  bool squareHere();
   bool turnTo(bool ccw);
   bool park(Pose pose, int16_t us[NUS]);
   bool setGoal(float g);
