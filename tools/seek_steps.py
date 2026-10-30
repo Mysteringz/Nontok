@@ -54,6 +54,40 @@ SPREAD = 40                                   # mm: a sensor varying more across
 BEAM_WINDOW = 150                             # a 45 deg beam this far off its target is on another surface
 
 
+# Forward-facing ultrasonic mounts (fwd mm, left mm, deg CCW) by reading index. Approximate: the
+# robot's mounts are not measured; the wall fit below only needs them roughly.
+MOUNTS = {0: (150, 95, 45), 1: (150, -95, -45), 2: (150, 0, 0)}
+BEAM_HALF_CONE = 12.0   # deg: a flat wall reads its perpendicular distance this far off square
+
+
+def fit_wall(points, window=40):
+    """Main-wall direction from a heading sweep. points: (heading deg, reading index, mm). For a
+    trial wall normal phi, each reading implies a wall distance (beam cone and mount allowed for);
+    the wall is the phi where the most readings agree on one distance (others hit other
+    surfaces). Returns (phi, distance, readings agreeing). Checked on the six 30 Oct sweeps."""
+    best = None
+    for i in range(-900, 901, 5):
+        phi = i / 10
+        nx, ny = math.cos(math.radians(phi)), math.sin(math.radians(phi))
+        implied = []
+        for th, k, r in points:
+            f, l, a = MOUNTS[k]
+            t = math.radians(th)
+            px, py = f * math.cos(t) - l * math.sin(t), f * math.sin(t) + l * math.cos(t)
+            beta = abs((th + a - phi + 180) % 360 - 180)
+            if beta <= 70:
+                implied.append(r * math.cos(math.radians(max(0.0, beta - BEAM_HALF_CONE))) + px * nx + py * ny)
+        implied.sort()
+        j = 0
+        for e in range(len(implied)):
+            while implied[e] - implied[j] > 2 * window:
+                j += 1
+            n = e - j + 1
+            if 400 < implied[e] < 1800 and (best is None or n > best[2] or (n == best[2] and abs(phi) < abs(best[0]))):
+                best = (phi, (implied[e] + implied[j]) / 2, n)
+    return best
+
+
 def get(path):
     return json.load(urllib.request.urlopen(BASE + path, timeout=5))
 
@@ -195,7 +229,12 @@ class Seeker:
         ls, rs = side("side_left"), side("side_right")
         ey, sideways_from_45 = None, False
         if "side_left" in ref and "side_right" in ref:
-            if ls and rs:
+            l_raw, r_raw = r("side_left"), r("side_right")
+            if l_raw and r_raw and abs((l_raw + r_raw) - (ref["side_left"] + ref["side_right"])) <= 100:
+                # Both side walls, proven by their spacing (sum = the capture's): trust them however
+                # far off the robot is (30 Oct: 997 + 321 vs 633 + 681 = 360 mm right of N).
+                ey = ((l_raw - r_raw) - (ref["side_left"] - ref["side_right"])) / 2
+            elif ls and rs:
                 ey = ((ls - rs) - (ref["side_left"] - ref["side_right"])) / 2
         elif "side_right" in ref and rs:
             ey = ref["side_right"] - rs
@@ -287,7 +326,7 @@ class Seeker:
         self.link.record(kind="seek_start", name=name, target=target, ref=ref)
         self.slope = None
         us, _ = self.link.measure()
-        lost, last_axis, jumps, prev_front, moved_x = 0, "y", 0, None, 0
+        lost, last_axis, jumps, prev_front, moved_x, lost_side = 0, "y", 0, None, 0, 0
         for move in range(max_moves):
             ex, ey, beams = self.errors(ref, us, creep, beam_window)
             if not heading:
@@ -372,6 +411,12 @@ class Seeker:
                 moved_x = 1000
                 self.learn("x", ex, self.errors(ref, us2, creep, beam_window)[0], ms)
                 us2 = self.hold(us2)
+            elif any(k in ref for k in ("side_left", "side_right")):
+                if lost_side >= 2:
+                    raise Abort("%s: the side walls are not where the capture saw them (sideways unknown)" % target)
+                lost_side += 1
+                us, _ = self.link.measure()
+                continue
             else:
                 # Only y unmeasurable (side wall out of range): good enough on x and heading.
                 print("  reached %s (sideways not measurable here) after %d moves" % (target, move), flush=True)
@@ -544,15 +589,24 @@ class Seeker:
             cur.append((yaw, f))
         runs.append(cur)
         runs = [r for r in runs if len(r) >= 3]
-        if not runs:
-            raise Abort("sweep: no flat stretch of front readings (wall not seen)")
+        # Which stretch is the main wall: the one nearest the direction a straight-line fit of
+        # all three beams finds (the wall is only ~80 cm long, so from off-centre starts the
+        # front also sweeps across its end and beyond; "nearest the start" picked wrong, 30 Oct).
         mid = lambda r: (r[0][0] + r[-1][0]) / 2
-        wall = min(runs, key=lambda r: abs(mid(r) - y0))
-        normal, dist = mid(wall), statistics.median(f for _, f in wall)
-        edge = wall[0][0] <= scan[0][0] + 2 or wall[-1][0] >= scan[-1][0] - 2
-        print("  main wall %d mm, flat from %+.1f to %+.1f; square heading %+.1f from the start%s" % (
-            dist, wall[0][0] - y0, wall[-1][0] - y0, normal - y0, "  WARNING: at the sweep edge" if edge else ""), flush=True)
-        self.link.record(kind="wall_normal", normal=normal, dist=dist, runs=runs, edge=edge)
+        points = [(yaw - y0, k, u) for yaw, *rd in scan for k, u in zip((2, 0, 1), rd) if u > 0]
+        phi, wall_d, agree = fit_wall(points)
+        print("  wall fit: square at %+.1f deg, %d mm (%d of %d readings agree)" % (phi, wall_d, agree, len(points)), flush=True)
+        near = [r for r in runs if abs(mid(r) - y0 - phi) <= 15]
+        if near:
+            wall = min(near, key=lambda r: abs(mid(r) - y0 - phi))
+            normal, dist = mid(wall), statistics.median(f for _, f in wall)
+            how = "flat stretch %+.1f..%+.1f" % (wall[0][0] - y0, wall[-1][0] - y0)
+        else:
+            normal, dist, how = y0 + phi, wall_d, "fit only (no flat stretch within 15 deg)"
+        edge = abs(normal - y0) > span - 8
+        print("  main wall %d mm; square heading %+.1f from the start (%s)%s" % (
+            dist, normal - y0, how, "  WARNING: near the sweep edge" if edge else ""), flush=True)
+        self.link.record(kind="wall_normal", normal=normal, dist=dist, runs=runs, fit=[phi, wall_d, agree], edge=edge)
         self.goal, self.goal_lost = normal, self.link.lost()
         self.rotate_to(normal, tol=3, strict=False)
         return self.link.measure()[0]
@@ -577,13 +631,17 @@ class Seeker:
             us[IDX["front"]], ref["front"], [int(us[IDX["left"]]), int(us[IDX["right"]])], ref["left"], ref["right"],
             best, "left" if direction > 0 else "right"), flush=True)
         for i in range(2 * steps_each_way + 4):
-            if best <= good:
-                break
-            if steps[direction] >= steps_each_way:
-                direction = -direction
-                if steps[direction] >= steps_each_way:
-                    break
-            _, us = self.translate("y", direction * 80)
+            if best <= good or steps[direction] >= steps_each_way:
+                break   # reached, or as far as allowed this way (stay inside the sector)
+            # Fixed strafes: the learned size shrank to 1-2 cm (30 Oct); longer while far off.
+            ms = 300 if best > 300 else 200
+            before = self.link.yaw()
+            self.link.pulse(0, direction * 100, self.wcomp.get(("y", direction), 0), PWM["y"], ms)
+            us, _ = self.link.measure()
+            after = self.link.yaw()
+            if before is not None and after is not None:
+                w = self.wcomp.get(("y", direction), 0)
+                self.wcomp[("y", direction)] = int(max(-40, min(40, w - 2 * (after - before))))
             steps[direction] += 1
             us = self.hold(us)
             if us[IDX["front"]] > 0 and abs(us[IDX["front"]] - ref["front"]) > 40:
@@ -599,46 +657,60 @@ class Seeker:
                 if worse >= 2:
                     direction, worse = -direction, 0
         print("  P search done: match %d" % best, flush=True)
-        return self.fine_p(ref, us)
+        if best > 200:
+            raise Abort("P not found along its line (match %d): stopping rather than wandering" % best)
+        return self.fine_p(ref)
 
-    def fine_p(self, ref, us, done=25, max_steps=14):
-        """Fine sideways alignment on the two 45 deg beams. Signal s = (left - P's left) -
-        (right - P's right): a strafe right raises the left beam and lowers the right (field,
-        30 Oct), so s < 0 means strafe right. Shortest strafes, reverse when s grows; done when
-        |s| <= `done` mm (each beam ~12 mm off) or after two reversals (at the best spot)."""
-        def signal(u):
-            l, r = u[IDX["left"]], u[IDX["right"]]
-            return (l - ref["left"]) - (r - ref["right"]) if l > 0 and r > 0 else None
-        s = signal(us)
-        direction, reversals, ms = (-1 if s is not None and s < 0 else 1), 0, T_MIN
-        print("01 fine on the 45 deg beams: signal %s" % ("-" if s is None else "%+d" % s), flush=True)
-        for step in range(max_steps):
-            if s is not None and abs(s) <= done:
+    def fine_p(self, ref, done=40, tries=16):
+        """Fine P on the two 45 deg beams, over sideways position AND heading (the wall sweep
+        finds square only to ~+/-5 deg, and a twist moves the two beams differently, which no
+        strafe can fix). Trial moves: short strafe left/right, 5 deg turn either way; keep a
+        move that improves the beam match by > 8 mm, otherwise undo it and try the next kind.
+        Stops when no move helps or the match is under `done` (each beam ~20 mm off)."""
+        def beams_match():
+            for _ in range(3):   # a missing or jumpy beam: look again rather than judge
+                u, _ = self.link.measure()
+                l, r = u[IDX["left"]], u[IDX["right"]]
+                if l > 0 and r > 0:
+                    return abs(l - ref["left"]) + abs(r - ref["right"]), u
+            return None, u
+        def strafe(d, ms=160):
+            self.link.pulse(0, d * 100, self.wcomp.get(("y", d), 0), PWM["y"], ms)
+            self.link.measure()
+            self.hold(None)
+        def turn(deg):
+            self.goal += deg
+            self.rotate_to(self.goal, tol=2, strict=False)
+        moves = [("strafe left", lambda: strafe(1), lambda: strafe(-1)),
+                 ("strafe right", lambda: strafe(-1), lambda: strafe(1)),
+                 ("turn left 5", lambda: turn(5), lambda: turn(-5)),
+                 ("turn right 5", lambda: turn(-5), lambda: turn(5))]
+        best, us = beams_match()
+        if best is None:
+            raise Abort("fine P: the 45 deg beams do not see P's surfaces")
+        print("01 fine on beams and heading: match %d" % best, flush=True)
+        i = failed = 0
+        for _ in range(tries):
+            if best <= done or failed >= len(moves):
                 break
-            if us[IDX["front"]] > 0 and abs(us[IDX["front"]] - ref["front"]) > 25:
-                _, us = self.translate("x", us[IDX["front"]] - ref["front"])
-                us = self.hold(us)
-                s = signal(us) if signal(us) is not None else s
-                continue
-            self.link.pulse(0, direction * 100, self.wcomp.get(("y", direction), 0), PWM["y"], ms)
-            us, _ = self.link.measure()
+            name, do, undo = moves[i]
+            do()
+            m, u = beams_match()
+            ok = m is not None and m < best - 8
+            print("  try %-12s match %s (best %d) %s" % (name, "-" if m is None else int(m), best, "keep" if ok else "undo"), flush=True)
+            self.link.record(kind="fine_p", move=name, match=m, best=best, us=u, kept=ok)
+            if ok:
+                best, us, failed = m, u, 0   # same move again next
+            else:
+                undo()
+                failed += 1
+                i = (i + 1) % len(moves)
+        _, us = beams_match()
+        if us[IDX["front"]] > 0 and abs(us[IDX["front"]] - ref["front"]) > 30:
+            _, us = self.translate("x", us[IDX["front"]] - ref["front"])
             us = self.hold(us)
-            s2 = signal(us)
-            print("  fine %s: beams %s signal %s" % ("left" if direction > 0 else "right",
-                  [int(us[IDX["left"]]), int(us[IDX["right"]])], "-" if s2 is None else "%+d" % s2), flush=True)
-            self.link.record(kind="fine_p", direction=direction, us=us, signal=s2)
-            if s2 is None:
-                continue
-            if s is not None and abs(s2 - s) < 6:
-                ms = min(200, ms + 30)   # did not move: static friction, push longer
-            if s is not None and abs(s2) > abs(s) + 10:   # got worse: the other way
-                direction, reversals = -direction, reversals + 1
-                if reversals >= 2:
-                    s = s2
-                    break
-            s = s2
-        print("  at P: front %d (P %d), beams %d/%d (P %d/%d)" % (us[IDX["front"]], ref["front"], us[IDX["left"]],
-              us[IDX["right"]], ref["left"], ref["right"]), flush=True)
+        print("  at P: front %d (P %d), beams %d/%d (P %d/%d), match %d" % (us[IDX["front"]], ref["front"], us[IDX["left"]],
+              us[IDX["right"]], ref["left"], ref["right"], best), flush=True)
         return us
 
     def turn_to(self, target, cal, ccw):
