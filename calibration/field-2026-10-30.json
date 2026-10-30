@@ -65,20 +65,21 @@
     },
     "left_box": {
       "label": "Left parking box",
-      "captured": "2026-10-30T06:03:28.023071+00:00",
-      "note": "Left parking box (re-placed), facing left wall; USB 30 Oct",
+      "captured": "2026-10-30T07:19:56.302078+00:00",
+      "note": "Left parking box, square to the left wall (re-capture after the 30 Oct seek tests); USB 30 Oct",
       "samples": 25,
       "warnings": [
-        "left ultrasonic varies > 15 mm: something moved?"
+        "left ultrasonic varies > 15 mm: something moved?",
+        "side_left ultrasonic: 25 of 25 samples had no echo"
       ],
       "ref": {
-        "front": 51,
-        "side_left": 1001,
-        "side_right": 216,
-        "left": 898,
-        "right": 278
+        "front": 47,
+        "side_left": 9999,
+        "side_right": 211,
+        "left": 9999,
+        "right": 277
       },
-      "color_rg_ratio": 1.075
+      "color_rg_ratio": 1.049
     },
     "turned_right": {
       "label": "N turned right (faces right wall)",

@@ -23,6 +23,7 @@ static const uint8_t motorIn1[]={34,37,43,A4},motorIn2[]={35,36,42,A5};
 static const uint8_t SPIN_PWM=90,DRIVE_PWM_MAX=200;
 static const uint16_t SPIN_MS=800,DRIVE_WATCHDOG_MS=400;
 static bool motorsLive=false;static int8_t spinning=-1;static uint32_t motorDeadline=0;
+static bool pulsing=false;   // A timed PULSE move is running; its end is reported as pulse_done.
 // Soft start: outputs step toward their targets by RAMP_STEP every RAMP_MS (0->100 in
 // ~125 ms), limiting the inrush that reset the board with four motors starting at once.
 // Stopping is never ramped.
@@ -71,6 +72,9 @@ static float bias[3]={},biasSd[3]={},angle[3]={};
 static int16_t lastRaw[3]={};
 static uint32_t frames=0,intRises=0,intDrains=0,timerDrains=0,busErrors=0,lastDrainMs=0,lastFrameMs=0;
 static uint32_t i2cTimeouts=0,gyroRestarts=0,gyroResets=0;static bool gyroNeedsSetup=false;
+// QUIETGYRO: no I2C at all while a motor runs (motor noise corrupts the bus). The chip keeps
+// sampling into its FIFO (~0.85 s of gyro frames at 200 Hz), drained once the motors stop.
+static bool gyroQuiet=false;
 static uint16_t overflows=0,saturated=0;
 
 static void inhibitMotors() {
@@ -85,7 +89,7 @@ ISR(WDT_vect) {
 static void haltMotors() {
   inhibitMotors();
   if(motorsLive) for(uint8_t m=0;m<4;++m) { digitalWrite(motorIn1[m],LOW);digitalWrite(motorIn2[m],LOW); }
-  motorsLive=false;spinning=-1;
+  motorsLive=false;spinning=-1;pulsing=false;
   for(uint8_t m=0;m<4;++m) motorTarget[m]=motorNow[m]=0;
 }
 // "TURNTEST a b c d": 4 x (turn 180, turn back), run on board and ended by gyro Z, so it
@@ -293,6 +297,7 @@ static bool zeroFinish(bool automatic,bool overflowed) {
 static void gyroService() {
   wdt_reset();
   if(!gyroRunning) return;
+  if(gyroQuiet&&motorsLive) { lastFrameMs=lastDrainMs=millis();return; }  // Not "stuck": just quiet.
   if(gyroNeedsSetup||millis()-lastFrameMs>300) gyroConfigure();  // 200 Hz: 300 ms of nothing = stuck.
   bool level=digitalRead(gyroInt);if(level&&!intLast) ++intRises;intLast=level;
   uint32_t now=millis();
@@ -372,6 +377,7 @@ static void gyroReport() {
   Serial.print('}');
 }
 static void readAccel() {
+  if(gyroQuiet&&motorsLive) return;
   uint8_t accel[6];
   accelOk=gyroRunning&&reg(gyroAddress,core::MPU_ACCEL_XOUT,accel,6);
   if(gyroRunning&&!accelOk) ++busErrors;
@@ -596,7 +602,7 @@ static void stepReport(Print& o) {
 // it. Two bad checks in a row (0.5 s) trigger one. The bias belongs to the chip and is kept.
 static uint8_t gyroBadChecks=0;
 static void gyroHealth() {
-  if(!gyroRunning) return;
+  if(!gyroRunning||(gyroQuiet&&motorsLive)) return;
   const float LSB_PER_G=16384;  // ACCEL_CONFIG is left at its reset value, +/-2 g.
   float g2=0;for(uint8_t a=0;a<3;++a) g2+=float(accelRaw[a])*accelRaw[a];
   uint8_t who=0;
@@ -737,6 +743,33 @@ static void command(const char* line,bool usb) {
     out.print(F(",\"deg\":"));out.print(TT_DEG,0);out.print(F(",\"ms\":"));out.print(millis());out.println('}');
     return;
   }
+  // "PULSE x y w pwm ms": one timed move for the ultrasonic-only stop-and-go controller. x forward,
+  // y left, w CCW, each -100..100 (mixed like the step controller, scaled so the busiest wheel gets
+  // pwm); stops by itself after ms and reports pulse_done. Needs WMAP; no gyro involved.
+  if(!strncmp(line,"PULSE ",6)) {
+    int16_t v[5];stopMotors();
+    if(!parseInts(line+6,v,5)||abs(v[0])>100||abs(v[1])>100||abs(v[2])>100||v[3]<30||v[3]>int16_t(DRIVE_PWM_MAX)||v[4]<10||v[4]>1500) {
+      out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return;
+    }
+    if(wheelMotor[0]<0) { out.println(F("{\"error\":\"PULSE_NEEDS_WMAP\"}"));return; }
+    float wheel[4]={float(v[0]-v[1]-v[2]),float(v[0]+v[1]+v[2]),float(v[0]+v[1]-v[2]),float(v[0]-v[1]+v[2])},peak=0;  // FL FR RL RR
+    for(float w:wheel) peak=max(peak,fabsf(w));
+    if(peak<1) { out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return; }
+    int16_t raw[4]={};
+    for(uint8_t p=0;p<4;++p) raw[wheelMotor[p]]=wheelSign[p]*int16_t(v[3]*wheel[p]/peak);
+    for(uint8_t m=0;m<4;++m) setMotor(m,raw[m]);
+    motorsLive=true;pulsing=true;motorDeadline=millis()+v[4];
+    out.print(F("{\"type\":\"pulse_start\",\"ms\":"));out.print(millis());out.println('}');
+    return;
+  }
+  // "NOGYRO": stop all gyro I2C traffic (motor noise corrupts it); GYROINIT turns it back on.
+  if(!strcmp(line,"NOGYRO")) { gyroRunning=false;anglesValid=false;out.println(F("{\"type\":\"nogyro\"}"));return; }
+  if(!strcmp(line,"QUIETGYRO")) {
+    gyroQuiet=true;if(!gyroRunning) gyroBegin();
+    out.print(F("{\"type\":\"quietgyro\",\"running\":"));out.print(gyroRunning);
+    out.print(F(",\"bias_valid\":"));out.print(biasValid);out.println('}');
+    return;
+  }
   if(!strncmp(line,"MOT ",4)) {
     int16_t v[4];
     if(!parseDrive(line+4,v)) { stopMotors();out.println(F("{\"error\":\"BAD_MOT_STOPPED\"}"));return; }
@@ -804,8 +837,9 @@ static void service() {
   stepService();
   rampMotors();
   if(motorsLive&&int32_t(millis()-motorDeadline)>=0) {
-    int8_t m=spinning;stopMotors();
+    int8_t m=spinning;bool pulse=pulsing;stopMotors();
     if(m>=0) { out.print(F("{\"type\":\"spin_done\",\"motor\":"));out.print(m+1);out.println('}'); }
+    else if(pulse) { out.print(F("{\"type\":\"pulse_done\",\"ms\":"));out.print(millis());out.println('}'); }
     else out.println(F("{\"type\":\"drive_timeout_stop\"}"));
   }
 }
