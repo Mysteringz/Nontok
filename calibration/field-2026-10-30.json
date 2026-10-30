@@ -1,0 +1,119 @@
+{
+  "ref_order": [
+    "front",
+    "side_left",
+    "side_right",
+    "left",
+    "right"
+  ],
+  "no_ref": 9999,
+  "raw_captures": "field-2026-10-30.jsonl",
+  "targets": {
+    "p_point": {
+      "label": "Checkpoint P (centre of semicircle)",
+      "captured": "2026-10-30T05:53:51.877419+00:00",
+      "note": "P, centre of semicircle, facing down field; USB 30 Oct",
+      "samples": 25,
+      "warnings": [
+        "side_left ultrasonic: 25 of 25 samples had no echo",
+        "side_right ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 1004,
+        "side_left": 9999,
+        "side_right": 9999,
+        "left": 872,
+        "right": 1027
+      },
+      "color_rg_ratio": 1.074
+    },
+    "centre": {
+      "label": "Checkpoint N (colour plate)",
+      "captured": "2026-10-30T05:57:48.192855+00:00",
+      "note": "N, colour sensor over colour paper, square to back wall; USB 30 Oct",
+      "samples": 25,
+      "warnings": [
+        "left ultrasonic varies > 15 mm: something moved?",
+        "side_right ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 268,
+        "side_left": 633,
+        "side_right": 681,
+        "left": 658,
+        "right": 726
+      },
+      "color_rg_ratio": 0.835
+    },
+    "turned_left": {
+      "label": "N turned left (faces left wall)",
+      "captured": "2026-10-30T06:07:31.997226+00:00",
+      "note": "N turned 90 left in place, facing left wall; retake; USB 30 Oct",
+      "samples": 25,
+      "warnings": [
+        "left ultrasonic: 4 of 25 samples had no echo",
+        "left ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 605,
+        "side_left": 792,
+        "side_right": 215,
+        "left": 9999,
+        "right": 683
+      },
+      "color_rg_ratio": 1.065
+    },
+    "left_box": {
+      "label": "Left parking box",
+      "captured": "2026-10-30T06:03:28.023071+00:00",
+      "note": "Left parking box (re-placed), facing left wall; USB 30 Oct",
+      "samples": 25,
+      "warnings": [
+        "left ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 51,
+        "side_left": 1001,
+        "side_right": 216,
+        "left": 898,
+        "right": 278
+      },
+      "color_rg_ratio": 1.075
+    },
+    "turned_right": {
+      "label": "N turned right (faces right wall)",
+      "captured": "2026-10-30T06:05:44.606367+00:00",
+      "note": "N turned 90 right in place, facing right wall; USB 30 Oct",
+      "samples": 24,
+      "warnings": [
+        "side_right ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 627,
+        "side_left": 224,
+        "side_right": 9999,
+        "left": 636,
+        "right": 747
+      },
+      "color_rg_ratio": 1.046
+    },
+    "right_box": {
+      "label": "Right parking box",
+      "captured": "2026-10-30T06:09:25.828959+00:00",
+      "note": "Right parking box, parked, facing right wall; USB 30 Oct",
+      "samples": 25,
+      "warnings": [
+        "right ultrasonic varies > 15 mm: something moved?",
+        "side_right ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 59,
+        "side_left": 211,
+        "side_right": 9999,
+        "left": 237,
+        "right": 9999
+      },
+      "color_rg_ratio": 1.097
+    }
+  }
+}

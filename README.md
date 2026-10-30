@@ -105,6 +105,7 @@ Only edit paths that belong to your part. To change something the other part own
 | `firmware/hardware_probe_mega/`, `docs/core_claude_handover.md`, `docs/working_car_reference.md` | A |
 | `platformio.ini`, `dashboard/`, `tools/start_dashboard.sh`, `tools/telemetry_schema.py` | A |
 | `tests/` (repo root), `tools/verify_core.py`, `tools/record_telemetry.py` | A |
+| `calibration/`, `tools/export_calibration.py` (field pose captures and step-test targets) | A |
 | `docs/core_platform.md`, `docs/hardware.md`, `docs/serial_protocol.md`, `docs/core_survey.md` | A |
 | `tools/requirements.txt` (local dashboard/recorder) | A |
 | `firmware/lab_assistant_mega/` | B (assistant) |
@@ -233,5 +234,7 @@ tests/, tools/verify_core.py   A  host behavior checks
 dashboard/                    A  local telemetry UI, SQLite recordings and replay
 tools/start_dashboard.sh      A  Mac dashboard launcher
 tools/record_telemetry.py      A  optional desktop CSV recorder
+tools/export_calibration.py    A  copies console pose captures into calibration/
+calibration/                   A  field pose captures (raw) and step-test targets, per field session
 training/                      B  YOLO dataset split + training
 ```
