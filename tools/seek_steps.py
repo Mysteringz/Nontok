@@ -250,7 +250,9 @@ class Seeker:
             return
         moved = abs(before) - abs(after) if before * after > 0 else abs(before) + abs(after)
         if moved < -25:
-            raise Abort("%s move went the wrong way (%.0f -> %.0f mm)" % (axis, before, after))
+            if axis == "x":
+                raise Abort("%s move went the wrong way (%.0f -> %.0f mm)" % (axis, before, after))
+            return   # sideways from the jumpy 45 deg beams: a bad reading, not a reason to stop
         if moved > 5:
             k = moved / max(10, ms - DEAD_MS)
             new = 0.5 * self.k[axis] + 0.5 * k
@@ -294,7 +296,15 @@ class Seeker:
             fmt = lambda v: "-" if v is None else "%+.0f" % v
             print("  #%02d us %s  forward %s  sideways %s  beams %s" % (
                 move, [int(v) for v in us], fmt(ex), fmt(ey), {k: round(v) for k, v in beams.items()}), flush=True)
-            if ex is not None and prev_front and abs(us[IDX["front"]] - prev_front) > 100 + moved_x:
+            jumped = ex is not None and prev_front and abs(us[IDX["front"]] - prev_front) > 150 + moved_x
+            if jumped and ey is not None and abs(ey) > tol:
+                # The front beam slid off a narrow surface (the colour box edge, 30 Oct) after a
+                # sideways move: do not drive on it; finish the sideways correction first.
+                print("    front jumped %d -> %d without a forward move: sideways first" % (prev_front, us[IDX["front"]]), flush=True)
+                _, us = self.translate("y", ey)
+                us = self.hold(us)
+                continue
+            if jumped:
                 jumps += 1
                 if jumps <= 2:   # implausible jump without a forward/back move: measure again
                     us, _ = self.link.measure()
@@ -317,6 +327,8 @@ class Seeker:
                 return us
             # Largest remaining problem first; heading only once roughly in place.
             both_off = not x_ok and ey is not None and not y_ok
+            if both_off and abs(ex) < 400:
+                last_axis = "x"   # close in: line up sideways before driving on (keep the front beam on the box)
             if not x_ok and (y_ok or ey is None or (both_off and last_axis == "y")):
                 last_axis = "x"
                 ms, us2 = self.translate("x", ex)
@@ -495,6 +507,100 @@ class Seeker:
             return self.link.yaw()
         raise Abort("rotation: not within %.0f deg after 25 pulses" % tol)
 
+    def square_to_wall(self, span=50, plateau=40):
+        """Start: the robot faces the main wall at an unknown angle. Sweep the heading from
+        -span to +span (gyro-measured, small steps) recording the front distance; a flat wall
+        reads least when faced square, and the beam cone makes that a flat-bottomed dip, so
+        the square heading is the middle of the readings within `plateau` mm of the least.
+        Rotate there and hold it."""
+        self.link.measure()
+        y0 = self.link.yaw()
+        if y0 is None:
+            raise Abort("gyro not zeroed: keep the robot still")
+        print("01 square to the wall: sweep %+d..%+d deg around %.1f" % (-span, span, y0), flush=True)
+        self.rotate_to(y0 - span, tol=4)
+        scan = []
+        for step in range(30):
+            us, _ = self.link.measure()
+            yaw = self.link.yaw()
+            if yaw is None:
+                raise Abort("gyro lost data during the sweep")
+            scan.append((yaw, us[IDX["front"]], us[IDX["left"]], us[IDX["right"]]))
+            print("  sweep %+6.1f deg  front %5d  45L %5d  45R %5d" % (yaw - y0, *[int(v) for v in scan[-1][1:]]), flush=True)
+            self.link.record(kind="sweep", yaw=yaw, us=us)
+            if yaw >= y0 + span:
+                break
+            self.rotate_pulse(+1, yaw)
+        # Flat stretches: consecutive front readings within `plateau` mm of each other (one
+        # missing echo allowed). Other surfaces (short side walls, the colour box) make their
+        # own stretches; the main wall is the one nearest the direction the robot was placed.
+        runs, cur = [], []
+        for yaw, f, _, _ in scan:
+            if f <= 0:
+                continue
+            if cur and abs(f - cur[-1][1]) > plateau:
+                runs.append(cur)
+                cur = []
+            cur.append((yaw, f))
+        runs.append(cur)
+        runs = [r for r in runs if len(r) >= 3]
+        if not runs:
+            raise Abort("sweep: no flat stretch of front readings (wall not seen)")
+        mid = lambda r: (r[0][0] + r[-1][0]) / 2
+        wall = min(runs, key=lambda r: abs(mid(r) - y0))
+        normal, dist = mid(wall), statistics.median(f for _, f in wall)
+        edge = wall[0][0] <= scan[0][0] + 2 or wall[-1][0] >= scan[-1][0] - 2
+        print("  main wall %d mm, flat from %+.1f to %+.1f; square heading %+.1f from the start%s" % (
+            dist, wall[0][0] - y0, wall[-1][0] - y0, normal - y0, "  WARNING: at the sweep edge" if edge else ""), flush=True)
+        self.link.record(kind="wall_normal", normal=normal, dist=dist, runs=runs, edge=edge)
+        self.goal, self.goal_lost = normal, self.link.lost()
+        self.rotate_to(normal, tol=3, strict=False)
+        return self.link.measure()[0]
+
+    def find_p(self, cal, steps_each_way=14, good=70):
+        """After square_to_wall: onto P's line (front = P's front), then strafe along it
+        comparing the 45 deg beams with P's. Keep going while the match improves, reverse after
+        it worsens twice; at most `steps_each_way` strafes on each side (stay in the sector)."""
+        ref = self.refs("p_point", cal)
+        match = lambda u: sum(abs(u[IDX[k]] - ref[k]) if u[IDX[k]] > 0 else 400 for k in ("left", "right"))
+        us, _ = self.link.measure()
+        for _ in range(8):   # forward/back onto P's line
+            ex = us[IDX["front"]] - ref["front"] if us[IDX["front"]] > 0 else None
+            if ex is None or abs(ex) <= 30:
+                break
+            _, us = self.translate("x", ex)
+            us = self.hold(us)
+        guess = ((us[IDX["left"]] - us[IDX["right"]]) - (ref["left"] - ref["right"])) if us[IDX["left"]] > 0 and us[IDX["right"]] > 0 else 1
+        direction = 1 if guess > 0 else -1          # + = strafe left (creep formula sign)
+        best, worse, steps = match(us), 0, {1: 0, -1: 0}
+        print("01 find P along its line: front %d (P %d), beams %s vs P %d/%d, match %d; first try %s" % (
+            us[IDX["front"]], ref["front"], [int(us[IDX["left"]]), int(us[IDX["right"]])], ref["left"], ref["right"],
+            best, "left" if direction > 0 else "right"), flush=True)
+        for i in range(2 * steps_each_way + 4):
+            if best <= good:
+                break
+            if steps[direction] >= steps_each_way:
+                direction = -direction
+                if steps[direction] >= steps_each_way:
+                    break
+            _, us = self.translate("y", direction * 80)
+            steps[direction] += 1
+            us = self.hold(us)
+            if us[IDX["front"]] > 0 and abs(us[IDX["front"]] - ref["front"]) > 40:
+                _, us = self.translate("x", us[IDX["front"]] - ref["front"])
+            m = match(us)
+            print("  strafe %s: beams %s match %d (best %d)" % ("left" if direction > 0 else "right",
+                  [int(us[IDX["left"]]), int(us[IDX["right"]])], m, best), flush=True)
+            self.link.record(kind="find_p", direction=direction, us=us, match=m, best=best)
+            if m < best - 10:
+                best, worse = m, 0
+            elif m > best + 30:   # clearly worse (the beams are jumpy): two of these and reverse
+                worse += 1
+                if worse >= 2:
+                    direction, worse = -direction, 0
+        print("  P search done: match %d" % best, flush=True)
+        return us
+
     def turn_to(self, target, cal, ccw):
         """The colour turn: 90 deg from the held heading (or the current one) on the gyro."""
         self.link.measure()
@@ -529,6 +635,8 @@ def main():
         link.measure()
         seeker.goal, seeker.goal_lost = link.yaw(), link.lost()   # placed square: hold this heading
         if first <= 1 <= last:
+            seeker.square_to_wall()
+            seeker.find_p(cal)
             seeker.seek("01", "p_point", cal, creep=True, tol=30, heading=False)
         if first <= 2 <= last:
             seeker.seek("02", "centre", cal, tol=30, heading=False)
