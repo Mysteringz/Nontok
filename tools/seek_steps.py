@@ -477,24 +477,31 @@ class Seeker:
         beams = [k for k in ("left", "right") if k in ref and ref[k] >= 200]
         if not beams:
             return us
+        def keep_heading(goal):   # an unused probe turn must be undone (30 Oct: left N 5 deg off)
+            self.goal, self.goal_lost = goal, self.link.lost()
+            self.rotate_to(goal, tol=2, strict=False)
+            return self.link.measure()[0]
         for attempt in range(tries):
+            goal0 = self.goal
             y0 = self.link.yaw()
             if y0 is None:
                 return us
             us1, y1 = self.rotate_pulse(+1, y0)
             if y1 is None:
-                return us1
+                return keep_heading(goal0) if goal0 is not None else us1
             slope = {k: (us1[IDX[k]] - us[IDX[k]]) / (y1 - y0) for k in beams
                      if us[IDX[k]] > 0 and us1[IDX[k]] > 0 and abs(us1[IDX[k]] - us[IDX[k]]) >= 10}
-            slope = {k: v for k, v in slope.items() if abs(v) >= 4}   # 2.4 mm/deg gave a wrong 9 deg fix (right box)
+            # 2.4 mm/deg gave a wrong 9 deg fix (right box); 55-79 mm/deg was a beam flipping across an
+            # edge at N and only undid its own probe. A wall seen at 45 deg gives roughly 5-20 mm/deg.
+            slope = {k: v for k, v in slope.items() if 4 <= abs(v) <= 25}
             fixes = [(ref[k] - us1[IDX[k]]) / slope[k] for k in slope]
             self.link.record(kind="square_beams", attempt=attempt, us0=us, us1=us1, dyaw=y1 - y0, slope=slope, fixes=fixes)
             if not fixes:
                 print("    45 deg beams do not respond to rotation: heading kept", flush=True)
-                return us1
+                return keep_heading(goal0) if goal0 is not None else us1
             if len(fixes) == 2 and abs(fixes[0] - fixes[1]) > 8:   # one beam jumped surfaces
                 print("    45 deg beams disagree (%+.1f vs %+.1f deg): heading kept" % tuple(fixes), flush=True)
-                return us1
+                return keep_heading(goal0) if goal0 is not None else us1
             fix = max(-12, min(12, sum(fixes) / len(fixes)))
             print("    45 deg beams: %s mm/deg, heading fix %+.1f deg" % ({k: round(v, 1) for k, v in slope.items()}, fix), flush=True)
             self.goal, self.goal_lost = y1 + fix, self.link.lost()
