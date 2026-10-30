@@ -471,7 +471,7 @@ class Seeker:
         raise Abort("park: not finished in %d moves" % max_moves)
 
     def square_to_beams(self, ref, us, tries=3):
-        """Absolute heading from the box capture (taken square): one small gyro-measured rotation
+        """Absolute heading from a capture taken square (N, the boxes): one small gyro-measured rotation
         gives each 45 deg beam's mm per degree; rotate by (target - reading) / slope, measured
         on the gyro. Corrects placement skew and gyro error that the held heading carries."""
         beams = [k for k in ("left", "right") if k in ref and ref[k] >= 200]
@@ -490,10 +490,13 @@ class Seeker:
             fixes = [(ref[k] - us1[IDX[k]]) / slope[k] for k in slope]
             self.link.record(kind="square_beams", attempt=attempt, us0=us, us1=us1, dyaw=y1 - y0, slope=slope, fixes=fixes)
             if not fixes:
-                print("    box beams do not respond to rotation: heading kept", flush=True)
+                print("    45 deg beams do not respond to rotation: heading kept", flush=True)
+                return us1
+            if len(fixes) == 2 and abs(fixes[0] - fixes[1]) > 8:   # one beam jumped surfaces
+                print("    45 deg beams disagree (%+.1f vs %+.1f deg): heading kept" % tuple(fixes), flush=True)
                 return us1
             fix = max(-12, min(12, sum(fixes) / len(fixes)))
-            print("    box beams: %s mm/deg, heading fix %+.1f deg" % ({k: round(v, 1) for k, v in slope.items()}, fix), flush=True)
+            print("    45 deg beams: %s mm/deg, heading fix %+.1f deg" % ({k: round(v, 1) for k, v in slope.items()}, fix), flush=True)
             self.goal, self.goal_lost = y1 + fix, self.link.lost()
             if abs(fix) <= 1.5:
                 return us1
@@ -718,7 +721,7 @@ class Seeker:
         raise Abort("P not reached in %d moves (beams %d/%d vs P %d/%d): not going on to N" % (
             moves, us[IDX["left"]], us[IDX["right"]], ref["left"], ref["right"]))
 
-    def descend_p(self, cal, done=75, moves=40):
+    def descend_p(self, cal, done=75, moves=40, turns=True):
         """Step 01 from wherever it was placed (pointing at the main wall): minimise the mismatch
         of the three forward sensors with P's readings. Each sensor's error is capped at 300 mm
         (a missing echo counts 300), so one beam flipping onto a side wall cannot dominate.
@@ -760,13 +763,15 @@ class Seeker:
                 print("  #%02d forward/back -> mismatch %d %s" % (move, cost, errs), flush=True)
                 continue
             el, er = errs["left"], errs["right"]
-            if el is not None and er is not None and (el > 0) == (er > 0) and min(abs(el), abs(er)) > 20:
+            if not turns:
+                order = ["right", "left"] if el is not None and er is not None and el - er < 0 else ["left", "right"]
+            elif el is not None and er is not None and (el > 0) == (er > 0) and min(abs(el), abs(er)) > 20:
                 order = ["ccw", "cw", "left", "right"]          # both off the same way: heading
             elif el is not None and er is not None and el - er < 0:
                 order = ["right", "left", "ccw", "cw"]          # strafe right lengthens the left beam
             else:
                 order = ["left", "right", "ccw", "cw"]
-            if keep in order:
+            if keep in order and keep is not None:
                 order.remove(keep)
                 order.insert(0, keep)
             improved = False
@@ -792,6 +797,44 @@ class Seeker:
                 y_ms, w_deg = max(T_MIN, int(y_ms * 0.7)), max(4.0, w_deg * 0.7)
                 us, errs, cost = look()
         raise Abort("P not reached (mismatch %d %s): not going on to N" % (cost, errs))
+
+    def square_at_p(self, span=30, plateau=30):
+        """Heading at P: the three-sensor match can trade a twist for a sideways offset (field:
+        P matched while 20 deg off). Near P the front faces the main wall dead on, so a short
+        sweep is clean: the square heading is the middle of the readings within `plateau` mm of
+        the least. Rotate there and hold it."""
+        self.link.measure()
+        y0 = self.link.yaw()
+        if y0 is None:
+            raise Abort("gyro not valid")
+        self.rotate_to(y0 - span, tol=4)
+        scan = []
+        for _ in range(16):
+            us, _ = self.link.measure()
+            yaw = self.link.yaw()
+            if yaw is None:
+                raise Abort("gyro lost data during the sweep at P")
+            if us[IDX["front"]] > 0:
+                scan.append((yaw, us[IDX["front"]]))
+            self.link.record(kind="p_sweep", yaw=yaw, us=us)
+            if yaw >= y0 + span:
+                break
+            self.rotate_pulse(+1, yaw)
+        if len(scan) < 4:
+            raise Abort("sweep at P: the front sensor hardly saw the wall")
+        least = min(f for _, f in scan)
+        i = min(range(len(scan)), key=lambda j: scan[j][1])
+        lo = hi = i   # the contiguous stretch around the least reading
+        while lo > 0 and scan[lo - 1][1] <= least + plateau:
+            lo -= 1
+        while hi < len(scan) - 1 and scan[hi + 1][1] <= least + plateau:
+            hi += 1
+        normal = (scan[lo][0] + scan[hi][0]) / 2
+        print("01 square at P: front %s; wall least %d mm, flat %+.1f..%+.1f -> square %+.1f deg from where it was" % (
+            " ".join("%+.0f:%d" % (y - y0, f) for y, f in scan), least, scan[lo][0] - y0, scan[hi][0] - y0, normal - y0), flush=True)
+        self.link.record(kind="p_square", normal=normal, least=least, scan=scan)
+        self.goal, self.goal_lost = normal, self.link.lost()
+        self.rotate_to(normal, tol=2, strict=False)
 
     def turn_to(self, target, cal, ccw):
         """The colour turn: 90 deg from the held heading (or the current one) on the gyro."""
@@ -827,9 +870,15 @@ def main():
         link.measure()
         seeker.goal, seeker.goal_lost = link.yaw(), link.lost()   # placed square: hold this heading
         if first <= 1 <= last:
-            seeker.descend_p(cal)   # placed pointing at the wall: match P's three forward readings
+            seeker.descend_p(cal)               # placed pointing at the wall: match P's three forward readings
+            seeker.square_at_p()                # the match can hide a twist: square up on the wall at P
+            seeker.descend_p(cal, turns=False)  # then sideways/forward only, heading locked
         if first <= 2 <= last:
-            seeker.seek("02", "centre", cal, tol=30, heading=False)
+            us = seeker.seek("02", "centre", cal, tol=20, heading=False)
+            # Heading at N: forward and sideways are exact here (front + side walls), so what the
+            # 45 deg beams still disagree on is the twist carried from P (field: 5-10 deg).
+            us = seeker.square_to_beams(seeker.refs("centre", cal), us)
+            seeker.seek("02", "centre", cal, tol=20, heading=False)
         turn = None
         if first <= 3 <= last:
             _, ratio = link.measure()
