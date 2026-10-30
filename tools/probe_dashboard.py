@@ -21,12 +21,14 @@ import serial
 from serial.tools import list_ports
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMANDS = {"STATUS", "PROBE", "GYROINIT", "GYROZERO", "HEADING0", "STOP", "HELP", "NOGYRO", "QUIETGYRO"}
+COMMANDS = {"STATUS", "PROBE", "GYROINIT", "GYROZERO", "HEADING0", "STOP", "HELP", "NOGYRO", "QUIETGYRO",
+            "CALSAVE", "CALSHOW", "RUN"}
 # Motion: one-motor identify spin, raw watchdogged drive (firmware caps |v| at 200)
 # and the on-board 180-degree turn test.
 MOTION = re.compile(r"SPIN [1-4] [+-]|(MOT|TURNTEST)( -?\d{1,3}){4}"
                     r"|WMAP( [1-4] -?1){4}|REF( \d{1,4}){5}|GO( [01]){3}( \d{1,3}){2}|TURN -?\d{1,3}( \d{1,3}){2}"
-                    r"|PULSE( -?\d{1,3}){3} \d{1,3} \d{1,4}")  # timed move for the ultrasonic-only controller
+                    r"|PULSE( -?\d{1,3}){3} \d{1,3} \d{1,4}"  # timed move for the stop-and-go controller
+                    r"|CAL [0-5]( \d{1,4}){5}|CALRG \d{1,4} \d{1,4}|RUN [1-4] [1-4]( -?1| 0)?")  # run calibration, run
 PAGE = ROOT / "tools" / "probe_dashboard.html"
 # Competition calibration: 5 s of stationary readings per pose, appended one capture per line.
 CAPTURES = ROOT / ".local-data" / "calibration" / "pose-captures.jsonl"

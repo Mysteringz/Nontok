@@ -1,4 +1,6 @@
-// Temporary diagnostics: no motion controller or EEPROM writes. Motion is limited to
+// Hardware probe and the on-Mega tournament run. RUN executes the stop-and-go controller in
+// run_logic.cpp (positions from the ultrasonics, heading from the gyro read only while stopped)
+// using the calibration stored by CALSAVE, the only EEPROM write (see calCommand). Other motion is
 // "SPIN m +|-" (one motor, PWM 90/255, stops after 0.8 s) for identifying wheels, and
 // "MOT a b c d" manual drive (raw signed PWM for M1..M4, |v| <= 200, stops unless
 // refreshed within 0.4 s), and "TURNTEST a b c d" (see ttEnd). STOP, '!' or a malformed line stops all motors. If the program
@@ -15,6 +17,8 @@
 #include <avr/wdt.h>
 #include "../../core_robot_mega/include/frequency_color.h"
 #include "../../core_robot_mega/include/mpu_gyro.h"
+#include <EEPROM.h>
+#include "run_logic.h"
 extern "C" uint8_t colorPulseBurst();
 static_assert(F_CPU==core::COLOR_CPU_HZ,"Probe sampling requires a 16 MHz Mega");
 static const uint8_t pwm[]={12,8,9,5};
@@ -24,6 +28,10 @@ static const uint8_t SPIN_PWM=90,DRIVE_PWM_MAX=200;
 static const uint16_t SPIN_MS=800,DRIVE_WATCHDOG_MS=400;
 static bool motorsLive=false;static int8_t spinning=-1;static uint32_t motorDeadline=0;
 static bool pulsing=false;   // A timed PULSE move is running; its end is reported as pulse_done.
+// Tournament run on the Mega (RUN, see runTournament): requested by a command, executed from
+// loop(); STOP, '!' or a malformed line set runStop and the run ends at its next wait.
+static bool runRequested=false,runActive=false,runStop=false;
+static uint8_t runFirst=1,runLast=4;static int8_t runForceTurn=0;
 // Soft start: outputs step toward their targets by RAMP_STEP every RAMP_MS (0->100 in
 // ~125 ms), limiting the inrush that reset the board with four motors starting at once.
 // Stopping is never ramped.
@@ -620,6 +628,7 @@ static void gyroHealth() {
 }
 static void service(); // Commands, motor watchdog and gyro, also called mid-sample.
 static bool sampling=false;
+static uint16_t rgbc[4]={};   // Latest colour R, G, B, clear (sample(); the run reads it too).
 static void sample() {
   if(sampling) return;
   sampling=true;
@@ -636,7 +645,6 @@ static void sample() {
   ++usSeq;service();
   // Channels R, G, B, clear; 3 ms filter settling, then 96 bursts (6.912 ms exposure).
   // Skipped during a step so ranges update faster; the last reading is repeated.
-  static uint16_t rgbc[4]={};
   for(uint8_t channel=0;stepKind==STEP_IDLE&&channel<4;++channel) {
     if(!channel) for(uint16_t& c:rgbc) c=0;
     digitalWrite(colorS2,core::frequencyS2(channel)?HIGH:LOW);
@@ -684,8 +692,93 @@ static void btAt(const char* text,bool crlf) {
   Serial.print(F("\",\"crlf\":"));Serial.print(crlf);
   Serial.print(F(",\"reply\":\""));Serial.print(reply);Serial.println(F("\"}"));
 }
+// One timed mecanum move: x forward, y left, w CCW, each -100..100, mixed like the step controller
+// and scaled so the busiest wheel gets pwm; stops by itself after ms (pulse_done). Needs a wheel map.
+static bool startPulse(int16_t x,int16_t y,int16_t w,int16_t p,int16_t ms) {
+  stopMotors();
+  if(abs(x)>100||abs(y)>100||abs(w)>100||p<30||p>int16_t(DRIVE_PWM_MAX)||ms<10||ms>1500) {
+    out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return false;
+  }
+  if(wheelMotor[0]<0) { out.println(F("{\"error\":\"PULSE_NEEDS_WMAP\"}"));return false; }
+  float wheel[4]={float(x-y-w),float(x+y+w),float(x+y-w),float(x-y+w)},peak=0;  // FL FR RL RR
+  for(float v:wheel) peak=max(peak,fabsf(v));
+  if(peak<1) { out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return false; }
+  int16_t raw[4]={};
+  for(uint8_t q=0;q<4;++q) raw[wheelMotor[q]]=wheelSign[q]*int16_t(p*wheel[q]/peak);
+  for(uint8_t m=0;m<4;++m) setMotor(m,raw[m]);
+  motorsLive=true;pulsing=true;motorDeadline=millis()+ms;
+  out.print(F("{\"type\":\"pulse_start\",\"ms\":"));out.print(millis());out.println('}');
+  return true;
+}
+// Tournament calibration, kept in EEPROM so the run needs no computer: the six checkpoints'
+// readings, the colour references and the wheel map. Stored near the top of the EEPROM, clear of
+// the competition firmware's two ~580-byte slots at address 0, with a CRC.
+//   CAL p f ls rs l45 r45   checkpoint p (0 P, 1 N, 2 N turned left, 3 left box, 4 N turned
+//                           right, 5 right box) in REF order; 9999 = not a target
+//   CALRG g r               colour red/green ratio x 1000 for green and red paper
+//   CALSAVE                 store those and the current wheel map (WMAP); CALSHOW prints them
+struct StoredCal { uint16_t magic;uint8_t version;int8_t wmotor[4],wsign[4];rl::Calib cal;uint16_t crc; };
+static const int CAL_ADDRESS=3968;
+static const uint16_t CAL_MAGIC=0x4e52;   // "NR"
+static_assert(CAL_ADDRESS+sizeof(StoredCal)<=4096,"Run calibration must fit the Mega EEPROM");
+static rl::Calib calRam;static bool calValid=false;
+static uint16_t calCrc(const StoredCal& c) {
+  uint16_t crc=0xffff;const uint8_t* b=reinterpret_cast<const uint8_t*>(&c);
+  for(size_t i=0;i<offsetof(StoredCal,crc);++i) { crc^=b[i];for(uint8_t k=0;k<8;++k) crc=(crc>>1)^((crc&1)?0xa001:0); }
+  return crc;
+}
+static void calLoad() {
+  StoredCal c;EEPROM.get(CAL_ADDRESS,c);
+  calValid=c.magic==CAL_MAGIC&&c.version==1&&c.crc==calCrc(c);
+  if(!calValid) return;
+  calRam=c.cal;
+  for(uint8_t i=0;i<4;++i) { wheelMotor[i]=c.wmotor[i];wheelSign[i]=c.wsign[i]; }
+}
+static void calShow() {
+  out.print(F("{\"type\":\"cal\",\"valid\":"));out.print(calValid);
+  out.print(F(",\"wmap\":["));
+  for(uint8_t i=0;i<4;++i) { if(i) out.print(',');out.print(wheelMotor[i]+1);out.print(',');out.print(wheelSign[i]); }
+  out.print(F("],\"rg_milli\":["));out.print(calRam.greenMilli);out.print(',');out.print(calRam.redMilli);
+  out.print(F("],\"ref\":["));
+  const uint8_t order[5]={2,3,4,0,1};   // REF order: front ls rs l45 r45
+  for(uint8_t p=0;p<rl::NPOSE;++p) {
+    out.print(p?F(",["):F("["));
+    for(uint8_t i=0;i<5;++i) { if(i) out.print(',');out.print(calRam.ref[p][order[i]]); }
+    out.print(']');
+  }
+  out.println(F("]}"));
+}
+static bool calCommand(const char* line) {
+  int16_t v[6];
+  if(!strncmp(line,"CAL ",4)) {
+    if(!parseInts(line+4,v,6)||v[0]<0||v[0]>=rl::NPOSE) { out.println(F("{\"error\":\"BAD_CAL\"}"));return true; }
+    const uint8_t order[5]={2,3,4,0,1};
+    for(uint8_t i=0;i<5;++i) calRam.ref[v[0]][order[i]]=v[i+1]>0?v[i+1]:rl::NONE;
+    out.print(F("{\"type\":\"cal_set\",\"pose\":"));out.print(v[0]);out.println('}');
+    return true;
+  }
+  if(!strncmp(line,"CALRG ",6)) {
+    if(!parseInts(line+6,v,2)||v[0]<100||v[1]<=v[0]) { out.println(F("{\"error\":\"BAD_CALRG\"}"));return true; }
+    calRam.greenMilli=v[0];calRam.redMilli=v[1];
+    out.println(F("{\"type\":\"cal_rg\"}"));
+    return true;
+  }
+  if(!strcmp(line,"CALSAVE")) {
+    if(wheelMotor[0]<0) { out.println(F("{\"error\":\"CALSAVE_NEEDS_WMAP\"}"));return true; }
+    StoredCal c;c.magic=CAL_MAGIC;c.version=1;c.cal=calRam;
+    for(uint8_t i=0;i<4;++i) { c.wmotor[i]=wheelMotor[i];c.wsign[i]=wheelSign[i]; }
+    c.crc=calCrc(c);EEPROM.put(CAL_ADDRESS,c);
+    calLoad();calShow();
+    return true;
+  }
+  if(!strcmp(line,"CALSHOW")) { calShow();return true; }
+  return false;
+}
 static void command(const char* line,bool usb) {
   if(!strcmp(line,"PING")) { if(!usb) { btPinged=true;btPingMs=millis(); } return; }
+  if(runActive&&strcmp(line,"STOP")&&strcmp(line,"STATUS")&&strcmp(line,"CALSHOW")) {
+    out.println(F("{\"error\":\"RUN_ACTIVE_SEND_STOP\"}"));return;
+  }
   if(usb&&!strcmp(line,"HANGTEST")) { // Proves the watchdog: freeze; expect a fresh "ready".
     stopMotors();Serial.println(F("{\"type\":\"hangtest\",\"expect\":\"reset within ~1 s\"}"));Serial.flush();
     for(;;) {}
@@ -751,18 +844,18 @@ static void command(const char* line,bool usb) {
   // pwm); stops by itself after ms and reports pulse_done. Needs WMAP; no gyro involved.
   if(!strncmp(line,"PULSE ",6)) {
     int16_t v[5];stopMotors();
-    if(!parseInts(line+6,v,5)||abs(v[0])>100||abs(v[1])>100||abs(v[2])>100||v[3]<30||v[3]>int16_t(DRIVE_PWM_MAX)||v[4]<10||v[4]>1500) {
-      out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return;
-    }
-    if(wheelMotor[0]<0) { out.println(F("{\"error\":\"PULSE_NEEDS_WMAP\"}"));return; }
-    float wheel[4]={float(v[0]-v[1]-v[2]),float(v[0]+v[1]+v[2]),float(v[0]+v[1]-v[2]),float(v[0]-v[1]+v[2])},peak=0;  // FL FR RL RR
-    for(float w:wheel) peak=max(peak,fabsf(w));
-    if(peak<1) { out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return; }
-    int16_t raw[4]={};
-    for(uint8_t p=0;p<4;++p) raw[wheelMotor[p]]=wheelSign[p]*int16_t(v[3]*wheel[p]/peak);
-    for(uint8_t m=0;m<4;++m) setMotor(m,raw[m]);
-    motorsLive=true;pulsing=true;motorDeadline=millis()+v[4];
-    out.print(F("{\"type\":\"pulse_start\",\"ms\":"));out.print(millis());out.println('}');
+    if(!parseInts(line+6,v,5)) { out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return; }
+    startPulse(v[0],v[1],v[2],v[3],v[4]);
+    return;
+  }
+  if(calCommand(line)) return;
+  if(!strcmp(line,"RUN")||!strncmp(line,"RUN ",4)) {
+    int16_t v[3]={1,4,0};
+    if(line[3]&&!parseInts(line+4,v,2)&&!parseInts(line+4,v,3)) { out.println(F("{\"error\":\"BAD_RUN\"}"));return; }
+    if(!calValid) { out.println(F("{\"error\":\"RUN_NEEDS_CALSAVE\"}"));return; }
+    if(v[0]<1||v[1]>4||v[0]>v[1]||v[2]<-1||v[2]>1) { out.println(F("{\"error\":\"BAD_RUN\"}"));return; }
+    runFirst=v[0];runLast=v[1];runForceTurn=v[2];runRequested=true;
+    out.print(F("{\"type\":\"run_accepted\",\"first\":"));out.print(runFirst);out.print(F(",\"last\":"));out.print(runLast);out.println('}');
     return;
   }
   // "NOGYRO": stop all gyro I2C traffic (motor noise corrupts it); GYROINIT turns it back on.
@@ -781,7 +874,7 @@ static void command(const char* line,bool usb) {
     motorsLive=true;motorDeadline=millis()+DRIVE_WATCHDOG_MS;
     return;
   }
-  if(!strcmp(line,"STOP")) { stopMotors();out.println(F("{\"type\":\"stop\",\"motors\":\"PWM_LOW\"}")); }
+  if(!strcmp(line,"STOP")) { stopMotors();runStop=runActive;out.println(F("{\"type\":\"stop\",\"motors\":\"PWM_LOW\"}")); }
   else if(!strcmp(line,"PROBE")) scan();
   else if(!strcmp(line,"STATUS")) sample();
   else if(!strcmp(line,"GYROZERO")) gyroZero();
@@ -797,13 +890,13 @@ static void command(const char* line,bool usb) {
 static void commands(Stream& in,LineReader& r,bool usb) {
   while(in.available()) {
     char c=in.read();
-    if(c=='!') { stopMotors();r.used=0;r.dropping=true;continue; }
+    if(c=='!') { stopMotors();runStop=runActive;r.used=0;r.dropping=true;continue; }
     if(c=='\r') continue;
     if(c=='\n') {
       if(r.dropping) { r.dropping=false;r.used=0;continue; }
       r.line[r.used]=0;r.used=0;command(r.line,usb);
     } else if(r.used<sizeof(r.line)-1) r.line[r.used++]=c;
-    else { r.used=0;r.dropping=true;stopMotors(); }
+    else { r.used=0;r.dropping=true;stopMotors();runStop=runActive; }
   }
 }
 void setup() {
@@ -825,12 +918,13 @@ void setup() {
   WDTCSR=_BV(WDCE)|_BV(WDE);
   WDTCSR=_BV(WDIE)|_BV(WDE)|_BV(WDP2)|_BV(WDP0);
   sei();
-  out.print(F("{\"type\":\"ready\",\"firmware\":\"HARDWARE_PROBE_2\",\"motion\":\"SPIN/MOT, watchdogged\",\"eeprom_writes\":false"));
+  out.print(F("{\"type\":\"ready\",\"firmware\":\"HARDWARE_PROBE_2\",\"motion\":\"SPIN/MOT, watchdogged\",\"eeprom_writes\":\"CALSAVE only\""));
   out.print(F(",\"reset_cause\":\""));
   out.print(bootCause);
   out.println(F("\"}"));
   gyroBegin();
   scan();
+  calLoad();calShow();
 }
 static void service() {
   commands(Serial,usbReader,true);
@@ -846,7 +940,75 @@ static void service() {
     else out.println(F("{\"type\":\"drive_timeout_stop\"}"));
   }
 }
+// The robot side of the run controller (run_logic.cpp). Every wait keeps the firmware going:
+// commands (STOP ends the run), watchdog, gyro, and the 5 Hz samples to USB and Bluetooth.
+class MegaIo : public rl::Io {
+ public:
+  bool pump() {
+    service();
+    if(millis()-lastSample>=200u) { lastSample=millis();sample(); }
+    return !runStop;
+  }
+  bool wait(uint16_t ms) {
+    for(uint32_t t=millis();millis()-t<ms;) if(!pump()) return false;
+    return true;
+  }
+  // Skip the scan in progress (it may have started while moving), then the median of the next
+  // three per sensor; fewer than two echoes or a spread over 40 mm reads -1.
+  bool measure(int16_t us[rl::NUS],float* rg) override {
+    int16_t scans[3][rl::NUS];uint16_t seen=usSeq;int8_t taken=-1;uint32_t t0=millis();
+    while(taken<3) {
+      if(!pump()) return false;
+      if(millis()-t0>4000) { out.println(F("{\"error\":\"RUN_NO_FRESH_SCANS\"}"));return false; }
+      if(usSeq==seen) continue;
+      seen=usSeq;
+      if(taken>=0) for(uint8_t k=0;k<rl::NUS;++k) scans[taken][k]=usLatest[k];
+      ++taken;
+    }
+    for(uint8_t k=0;k<rl::NUS;++k) {
+      int16_t v[3];uint8_t n=0;
+      for(uint8_t s=0;s<3;++s) if(scans[s][k]>0) v[n++]=scans[s][k];
+      int16_t lo=32767,hi=-1;
+      for(uint8_t i=0;i<n;++i) { lo=min(lo,v[i]);hi=max(hi,v[i]); }
+      us[k]=(n<2||hi-lo>40)?-1:(n==3?v[0]+v[1]+v[2]-lo-hi:(v[0]+v[1])/2);
+    }
+    *rg=rgbc[1]?float(rgbc[0])/rgbc[1]:0;
+    return true;
+  }
+  bool pulse(int8_t x,int8_t y,int8_t w,uint8_t pwm,uint16_t ms) override {
+    if(!startPulse(x,y,w,pwm,ms)) return false;
+    uint32_t t0=millis();
+    while(pulsing||motorsLive) {
+      if(!pump()) return false;
+      if(millis()-t0>ms+1000u) { stopMotors();return false; }
+    }
+    return wait(350);   // settle before measuring
+  }
+  bool yaw(float* deg) override {
+    if(!gyroRunning||!biasValid) return false;
+    *deg=yawDeg();return true;
+  }
+  uint16_t lost() override { return overflows+gyroRestarts+gyroResets; }
+  void event(const char* name,int16_t a,int16_t b,int16_t c,int16_t d) override {
+    out.print(F("{\"type\":\"run\",\"ev\":\""));out.print(reinterpret_cast<const __FlashStringHelper*>(name));
+    out.print(F("\",\"v\":["));out.print(a);out.print(',');out.print(b);out.print(',');out.print(c);out.print(',');out.print(d);
+    out.print(F("],\"ms\":"));out.print(millis());out.println('}');
+  }
+};
+static void runTournament() {
+  runRequested=false;runActive=true;runStop=false;
+  gyroQuiet=true;if(!gyroRunning) gyroBegin();   // no I2C while a motor runs
+  out.print(F("{\"type\":\"run_start\",\"first\":"));out.print(runFirst);out.print(F(",\"last\":"));out.print(runLast);out.println('}');
+  MegaIo io;rl::Runner runner(io,calRam);
+  bool ok=runner.run(runFirst,runLast,runForceTurn);
+  stopMotors();runActive=false;
+  out.print(F("{\"type\":\"run_end\",\"result\":\""));out.print(ok?F("done"):F("stopped"));
+  out.print(F("\",\"reason\":\""));
+  if(!ok&&runner.reason()) out.print(reinterpret_cast<const __FlashStringHelper*>(runner.reason()));
+  out.print(F("\",\"turn\":"));out.print(runner.turn());out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+}
 void loop() {
+  if(runRequested) runTournament();
   service();
   if(millis()-lastSample>=(stepKind==STEP_IDLE?200u:100u)) { lastSample=millis();sample(); }  // 5 Hz, 10 Hz in a step
 }
