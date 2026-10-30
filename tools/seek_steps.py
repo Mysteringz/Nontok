@@ -599,6 +599,46 @@ class Seeker:
                 if worse >= 2:
                     direction, worse = -direction, 0
         print("  P search done: match %d" % best, flush=True)
+        return self.fine_p(ref, us)
+
+    def fine_p(self, ref, us, done=25, max_steps=14):
+        """Fine sideways alignment on the two 45 deg beams. Signal s = (left - P's left) -
+        (right - P's right): a strafe right raises the left beam and lowers the right (field,
+        30 Oct), so s < 0 means strafe right. Shortest strafes, reverse when s grows; done when
+        |s| <= `done` mm (each beam ~12 mm off) or after two reversals (at the best spot)."""
+        def signal(u):
+            l, r = u[IDX["left"]], u[IDX["right"]]
+            return (l - ref["left"]) - (r - ref["right"]) if l > 0 and r > 0 else None
+        s = signal(us)
+        direction, reversals, ms = (-1 if s is not None and s < 0 else 1), 0, T_MIN
+        print("01 fine on the 45 deg beams: signal %s" % ("-" if s is None else "%+d" % s), flush=True)
+        for step in range(max_steps):
+            if s is not None and abs(s) <= done:
+                break
+            if us[IDX["front"]] > 0 and abs(us[IDX["front"]] - ref["front"]) > 25:
+                _, us = self.translate("x", us[IDX["front"]] - ref["front"])
+                us = self.hold(us)
+                s = signal(us) if signal(us) is not None else s
+                continue
+            self.link.pulse(0, direction * 100, self.wcomp.get(("y", direction), 0), PWM["y"], ms)
+            us, _ = self.link.measure()
+            us = self.hold(us)
+            s2 = signal(us)
+            print("  fine %s: beams %s signal %s" % ("left" if direction > 0 else "right",
+                  [int(us[IDX["left"]]), int(us[IDX["right"]])], "-" if s2 is None else "%+d" % s2), flush=True)
+            self.link.record(kind="fine_p", direction=direction, us=us, signal=s2)
+            if s2 is None:
+                continue
+            if s is not None and abs(s2 - s) < 6:
+                ms = min(200, ms + 30)   # did not move: static friction, push longer
+            if s is not None and abs(s2) > abs(s) + 10:   # got worse: the other way
+                direction, reversals = -direction, reversals + 1
+                if reversals >= 2:
+                    s = s2
+                    break
+            s = s2
+        print("  at P: front %d (P %d), beams %d/%d (P %d/%d)" % (us[IDX["front"]], ref["front"], us[IDX["left"]],
+              us[IDX["right"]], ref["left"], ref["right"]), flush=True)
         return us
 
     def turn_to(self, target, cal, ccw):
@@ -636,8 +676,7 @@ def main():
         seeker.goal, seeker.goal_lost = link.yaw(), link.lost()   # placed square: hold this heading
         if first <= 1 <= last:
             seeker.square_to_wall()
-            seeker.find_p(cal)
-            seeker.seek("01", "p_point", cal, creep=True, tol=30, heading=False)
+            seeker.find_p(cal)   # coarse search along P's line, then fine on the 45 deg beams
         if first <= 2 <= last:
             seeker.seek("02", "centre", cal, tol=30, heading=False)
         turn = None
