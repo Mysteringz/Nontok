@@ -236,7 +236,10 @@ static uint16_t gyroDrain(float* sum,float* squares) {
   if(!reg(gyroAddress,core::MPU_INT_STATUS,&status,1)||
      !reg(gyroAddress,core::MPU_FIFO_COUNT,count,2)) { ++busErrors;return 0; }
   uint16_t bytes=(uint16_t(count[0])<<8)|count[1];
-  if((status&core::MPU_INT_FIFO_OVERFLOW)||bytes>=core::MPU_FIFO_BYTES_MIN) {
+  // The MPU6050 (WHO_AM_I 0x68) has a 1024-byte FIFO, ~0.85 s of gyro frames: QUIETGYRO
+  // relies on it across a whole move. Other models keep the 512-byte family minimum.
+  uint16_t fifoLimit=gyroWho==0x68?1000:core::MPU_FIFO_BYTES_MIN;
+  if((status&core::MPU_INT_FIFO_OVERFLOW)||bytes>=fifoLimit) {
     ++overflows;anglesValid=false;fifoRestart();return 0;
   }
   uint16_t drained=0;bytes-=bytes%6;

@@ -108,11 +108,17 @@ class Link:
 
     def yaw(self):
         """CCW-positive heading from the last measured sample (QUIETGYRO: drained while stopped);
-        None if the gyro lost frames or is not zeroed."""
+        None if the gyro is not zeroed. After lost frames (FIFO overflow, bus error) the angle
+        keeps integrating but carries an unknown offset: lost() tells the caller to re-base."""
         g = getattr(self, "last_gyro", {})
-        if not g.get("angles_valid") or not g.get("bias_valid"):
+        if not g.get("bias_valid") or "angle_deg" not in g:
             return None
         return -g["angle_deg"][2] * 1.009   # chip Z points down; 4 x 90 deg read 357.4 (27 Oct)
+
+    def lost(self):
+        """Count of gyro data losses so far (overflows + restarts + resets)."""
+        g = getattr(self, "last_gyro", {})
+        return g.get("overflows", 0) + g.get("gyro_restarts", 0) + g.get("gyro_resets", 0)
 
     def stop(self):
         for _ in range(3):
@@ -167,6 +173,7 @@ class Seeker:
         self.k = {"x": 0.35, "y": 0.25}   # mm of error removed per ms of move (learned)
         self.slope = None                 # heading: mm per ms of CCW rotation, per beam (learned)
         self.goal = None                  # gyro heading to hold (deg, CCW +); set by the first hold
+        self.goal_lost = 0                # gyro data-loss count when the goal was set
         self.wcomp = {}                   # rotation mixed into a move (axis, sign) to cancel its spin
         self.rate = {}                    # deg per ms beyond the dead time, per rotation power
 
@@ -228,8 +235,10 @@ class Seeker:
         yaw = self.link.yaw()
         if yaw is None:
             return us
-        if self.goal is None:
-            self.goal = yaw
+        if self.goal is None or self.link.lost() != self.goal_lost:
+            if self.goal is not None:
+                print("    gyro lost data: holding the current heading from here", flush=True)
+            self.goal, self.goal_lost = yaw, self.link.lost()
         if abs(self.goal - yaw) <= HOLD_TOL:
             return us
         print("    heading %.1f, holding %.1f" % (yaw, self.goal), flush=True)
@@ -419,6 +428,7 @@ class Seeker:
                 return us1
             slope = {k: (us1[IDX[k]] - us[IDX[k]]) / (y1 - y0) for k in beams
                      if us[IDX[k]] > 0 and us1[IDX[k]] > 0 and abs(us1[IDX[k]] - us[IDX[k]]) >= 10}
+            slope = {k: v for k, v in slope.items() if abs(v) >= 4}   # 2.4 mm/deg gave a wrong 9 deg fix (right box)
             fixes = [(ref[k] - us1[IDX[k]]) / slope[k] for k in slope]
             self.link.record(kind="square_beams", attempt=attempt, us0=us, us1=us1, dyaw=y1 - y0, slope=slope, fixes=fixes)
             if not fixes:
@@ -426,7 +436,7 @@ class Seeker:
                 return us1
             fix = max(-12, min(12, sum(fixes) / len(fixes)))
             print("    box beams: %s mm/deg, heading fix %+.1f deg" % ({k: round(v, 1) for k, v in slope.items()}, fix), flush=True)
-            self.goal = y1 + fix
+            self.goal, self.goal_lost = y1 + fix, self.link.lost()
             if abs(fix) <= 1.5:
                 return us1
             self.rotate_to(self.goal, tol=1.5, strict=False)
@@ -452,10 +462,11 @@ class Seeker:
         for finer steps. A pulse that barely turns makes the next one longer; an overshoot is
         corrected by the next pulse back."""
         start_ms, best, stalls = {ROT_PWM: 200, ROT_FINE_PWM: T_MIN}, None, 0   # untried rate: big ~30 deg, fine shortest
+        lost0 = self.link.lost()
         for move in range(25 if strict else 6):
             yaw = self.link.yaw()
-            if yaw is None:
-                raise Abort("gyro lost frames (or not zeroed) during a rotation")
+            if yaw is None or self.link.lost() != lost0:
+                raise Abort("gyro not zeroed, or lost data during a rotation")
             err = goal - yaw
             self.link.record(kind="rotate", move=move, yaw=yaw, err=err)
             if abs(err) <= tol:
@@ -470,8 +481,8 @@ class Seeker:
             ms = self.link.pulse(0, 0, 100 if err > 0 else -100, pwm, ms)
             self.link.measure()
             after = self.link.yaw()
-            if after is None:
-                raise Abort("gyro lost frames during a rotation")
+            if after is None or self.link.lost() != lost0:
+                raise Abort("gyro lost data during a rotation")
             turned = abs(after - yaw)
             print("    rotate %s %d ms @%d: %.1f -> %.1f (goal %.1f)" % ("ccw" if err > 0 else "cw", ms, pwm, yaw, after, goal), flush=True)
             if turned < 1.0:
@@ -487,10 +498,10 @@ class Seeker:
     def turn_to(self, target, cal, ccw):
         """The colour turn: 90 deg from the held heading (or the current one) on the gyro."""
         self.link.measure()
-        start = self.goal if self.goal is not None else self.link.yaw()
+        start = self.goal if self.goal is not None and self.link.lost() == self.goal_lost else self.link.yaw()
         if start is None:
             raise Abort("gyro not valid for the turn (not zeroed or lost frames)")
-        self.goal = start + (90 if ccw else -90)
+        self.goal, self.goal_lost = start + (90 if ccw else -90), self.link.lost()
         print("turn %s on the gyro: %.1f -> %.1f deg" % ("left" if ccw else "right", start, self.goal), flush=True)
         yaw = self.rotate_to(self.goal)
         print("  turned: %.1f deg" % (yaw - start), flush=True)
@@ -516,7 +527,7 @@ def main():
         link.send("QUIETGYRO", ack="quietgyro")
         link.send(WMAP, ack="wmap")
         link.measure()
-        seeker.goal = link.yaw()   # the robot is placed square: hold this heading (None: hold() sets it)
+        seeker.goal, seeker.goal_lost = link.yaw(), link.lost()   # placed square: hold this heading
         if first <= 1 <= last:
             seeker.seek("01", "p_point", cal, creep=True, tol=30, heading=False)
         if first <= 2 <= last:
