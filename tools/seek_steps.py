@@ -349,13 +349,14 @@ class Seeker:
                     us, _ = self.link.measure()
                     continue
             jumps = 0
-            prev_front, moved_x = (us[IDX["front"]] if us[IDX["front"]] > 0 else prev_front), 0
-            if ex is None:
+            if ex is None:   # keep moved_x: the next good reading may still follow a forward move
                 lost += 1
                 if lost > 2:
-                    raise Abort("front reading lost")
+                    raise Abort("front reading lost (3 measurements in a row)")
                 us, _ = self.link.measure()
                 continue
+            lost = 0
+            prev_front, moved_x = us[IDX["front"]], 0
             x_ok = abs(ex) <= tol
             y_ok = ey is None and not any(k in ref for k in ("side_left", "side_right")) and not creep or \
                 (ey is not None and abs(ey) <= tol)
@@ -717,6 +718,81 @@ class Seeker:
         raise Abort("P not reached in %d moves (beams %d/%d vs P %d/%d): not going on to N" % (
             moves, us[IDX["left"]], us[IDX["right"]], ref["left"], ref["right"]))
 
+    def descend_p(self, cal, done=75, moves=40):
+        """Step 01 from wherever it was placed (pointing at the main wall): minimise the mismatch
+        of the three forward sensors with P's readings. Each sensor's error is capped at 300 mm
+        (a missing echo counts 300), so one beam flipping onto a side wall cannot dominate.
+        Forward/back is direct from the front sensor; sideways and heading by trial moves (strafe
+        left/right, turn +/-8 deg on the gyro): a move that lowers the mismatch by > 8 mm is kept
+        and repeated, otherwise undone; when no move helps, the steps shrink. P when the mismatch
+        is <= `done` (~25 mm a sensor); otherwise stop rather than go on to N."""
+        ref = self.refs("p_point", cal)
+        keys = ("front", "left", "right")
+        def look():
+            for _ in range(3):
+                u, _ = self.link.measure()
+                if all(u[IDX[k]] > 0 for k in keys):
+                    break
+            errs = {k: (u[IDX[k]] - ref[k]) if u[IDX[k]] > 0 else None for k in keys}
+            cost = sum(min(300, abs(e)) if e is not None else 300 for e in errs.values())
+            return u, errs, cost
+        def strafe(d, ms):
+            self.link.pulse(0, d * 100, self.wcomp.get(("y", d), 0), PWM["y"], ms)
+            self.link.measure()
+            self.hold(None)
+        def turn(deg):
+            self.goal += deg
+            self.rotate_to(self.goal, tol=2, strict=False)
+        y_ms, w_deg = 300, 8.0
+        us, errs, cost = look()
+        print("01 match P on three sensors: start mismatch %d %s" % (cost, errs), flush=True)
+        keep = None   # the move that last helped: try it first again
+        for move in range(moves):
+            if cost <= done:
+                print("  at P: mismatch %d %s" % (cost, errs), flush=True)
+                self.link.record(kind="p_reached", us=us, errs=errs, cost=cost)
+                return us
+            ef = errs["front"]
+            if ef is not None and abs(ef) > 30:
+                _, us = self.translate("x", ef)
+                us = self.hold(us)
+                us, errs, cost = look()
+                print("  #%02d forward/back -> mismatch %d %s" % (move, cost, errs), flush=True)
+                continue
+            el, er = errs["left"], errs["right"]
+            if el is not None and er is not None and (el > 0) == (er > 0) and min(abs(el), abs(er)) > 20:
+                order = ["ccw", "cw", "left", "right"]          # both off the same way: heading
+            elif el is not None and er is not None and el - er < 0:
+                order = ["right", "left", "ccw", "cw"]          # strafe right lengthens the left beam
+            else:
+                order = ["left", "right", "ccw", "cw"]
+            if keep in order:
+                order.remove(keep)
+                order.insert(0, keep)
+            improved = False
+            for name in order:
+                do = {"left": lambda: strafe(1, y_ms), "right": lambda: strafe(-1, y_ms),
+                      "ccw": lambda: turn(w_deg), "cw": lambda: turn(-w_deg)}[name]
+                undo = {"left": lambda: strafe(-1, y_ms), "right": lambda: strafe(1, y_ms),
+                        "ccw": lambda: turn(-w_deg), "cw": lambda: turn(w_deg)}[name]
+                do()
+                u2, e2, c2 = look()
+                ok = c2 < cost - 8
+                print("  #%02d try %-5s (%s) mismatch %d -> %d %s" % (move, name,
+                      "%d ms" % y_ms if name in ("left", "right") else "%.0f deg" % w_deg, cost, c2, "keep" if ok else "undo"), flush=True)
+                self.link.record(kind="descend_p", move=move, trial=name, cost=cost, new=c2, errs=e2, kept=ok)
+                if ok:
+                    us, errs, cost, keep, improved = u2, e2, c2, name, True
+                    break
+                undo()
+            if not improved:
+                keep = None
+                if y_ms <= T_MIN and w_deg <= 4:
+                    break
+                y_ms, w_deg = max(T_MIN, int(y_ms * 0.7)), max(4.0, w_deg * 0.7)
+                us, errs, cost = look()
+        raise Abort("P not reached (mismatch %d %s): not going on to N" % (cost, errs))
+
     def turn_to(self, target, cal, ccw):
         """The colour turn: 90 deg from the held heading (or the current one) on the gyro."""
         self.link.measure()
@@ -751,8 +827,7 @@ def main():
         link.measure()
         seeker.goal, seeker.goal_lost = link.yaw(), link.lost()   # placed square: hold this heading
         if first <= 1 <= last:
-            seeker.square_to_wall()
-            seeker.find_p(cal)   # coarse search along P's line, then fine on the 45 deg beams
+            seeker.descend_p(cal)   # placed pointing at the wall: match P's three forward readings
         if first <= 2 <= last:
             seeker.seek("02", "centre", cal, tol=30, heading=False)
         turn = None
