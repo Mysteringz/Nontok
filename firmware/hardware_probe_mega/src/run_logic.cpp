@@ -49,7 +49,6 @@ Runner::Runner(Io& io_, const Calib& cal_)
   stopTau = 0.15f;
   beamSlope[0] = beamSlope[1] = beamSlope[2] = 0;
   blocked = 0;
-  ignored = 0;
   cornered = false;
   skewMode = 0;
   rN = 0;
@@ -68,7 +67,7 @@ bool Runner::measure(int16_t us[NUS], float* rg) {
 
 void Runner::noteWalls(const int16_t* z) {
   for (uint8_t k = 0; k < NUS; ++k) {
-    if (z[k] <= 0 || (ignored & (1 << k))) continue;   // no echo, not pinged or a blocked sensor: keep what is known
+    if (z[k] <= 0) continue;   // no echo or not pinged: keep what is known
     if (z[k] <= BLOCK_MM) blocked |= 1 << k;
     else if (z[k] > 2 * BLOCK_MM) blocked &= ~(1 << k);
   }
@@ -277,7 +276,7 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
     if (s * (d + v * stopTau - stopAt) <= 3) break;   // predicted distance after stopping
     if (z[FRONT] > 0 && s * (z[FRONT] - stopAt) < -10) break;   // a raw echo already past the target: stop, whatever the filter says
     // a corner closing on a wall at an angle: either 45 deg beam (filtered, 2+ echoes) under 100 mm
-    if (s > 0 && ((!(ignored & (1 << L45)) && live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (!(ignored & (1 << R45)) && live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm))) {
+    if (s > 0 && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm))) {
       io.event(RL_F("corner_stop"), i16(kf[L45].dist()), i16(kf[R45].dist()));
       cornered = true;
       break;
@@ -1418,16 +1417,6 @@ bool Runner::recover(uint8_t set, int16_t us[NUS]) {
   memcpy(a, us, sizeof(a));
   TRY(driveForward(us[FRONT] + 80, DRIVE_MAX_MS, DRIVE_PWM, us));
   cornered = false;
-  // A close 45 deg reading that stayed put while the robot backed off is something on the robot (a
-  // cable in front of the sensor; 2 Nov: L45 read ~70 mm everywhere and the robot backed away from it
-  // all run): ignore that sensor from now on.
-  if (us[FRONT] > 0 && a[FRONT] > 0 && us[FRONT] - a[FRONT] > 50)
-    for (uint8_t k = L45; k <= R45; ++k)
-      if (a[k] > 0 && a[k] < cornerMm && us[k] > 0 && fabsf(float(us[k] - a[k])) < 25) {
-        ignored |= 1 << k;
-        blocked &= ~(1 << k);
-        io.event(RL_F("sensor_ignored"), k, a[k], us[k]);
-      }
   return straighten(set, a, us);
 }
 
@@ -1517,7 +1506,7 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[
     if (!doneY && (fabsf(eyP) <= stopY || eyP * ey0 < 0)) doneY = true;
     if (polls % 8 == 1) io.event(RL_F("mpoll"), i16(t), i16(ex), i16(ey), pwm);
     if (doneX && doneY) break;
-    if (mx > 0 && ((!(ignored & (1 << L45)) && live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (!(ignored & (1 << R45)) && live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm) ||
+    if (mx > 0 && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm) ||
                    (z[FRONT] > 0 && z[FRONT] < 40) ||   // the filtered front: a single short echo is not a wall (2 Nov at N)
                    (d[FRONT] > 0 && d[FRONT] < (ref[FRONT] != NONE && ref[FRONT] - 15 > 40 ? ref[FRONT] - 15 : 40)))) {
       io.event(RL_F("corner_stop"), i16(kf[L45].dist()), i16(kf[R45].dist()));
@@ -1615,19 +1604,11 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
   setGoal(y);   // placed pointing at the wall: hold this heading while creeping
   const int16_t* n = cal.ref[N];
   cornerMm = 100;
-  // At the start (on the arc, ~1 m out) no wall is within 15 cm: a 45 deg or side sensor reading that
-  // close is blocked by something on the robot and is ignored for the run.
-  if (first <= 1)
-    for (uint8_t k = 0; k < NUS; ++k)
-      if (k != FRONT && us[k] > 0 && us[k] < 150) { ignored |= 1 << k; io.event(RL_F("sensor_ignored"), k, us[k]); }
   if (first <= 1 && last >= 1) {
     io.event(RL_F("step"), 1);
     TRY(faceWall(us));
     TRY(walkTo(APPROACH_MM, us));                                      // 1
-    for (uint8_t i = 0; i < 2 && cornered; ++i) {                      //   stopped at a wall: back off, re-localize,
-      TRY(recover(SET_ALL, us));                                       //   then creep on
-      TRY(walkTo(APPROACH_MM, us));
-    }
+    if (cornered) TRY(recover(SET_ALL, us));                           //   stopped at a wall: back off, re-localize
   }
   if (first <= 2 && last >= 2) {
     io.event(RL_F("step"), 2);

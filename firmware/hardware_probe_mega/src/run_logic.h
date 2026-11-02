@@ -206,7 +206,6 @@ class Runner {
   // 2 cm rule (user, 2 Nov): a sensor reading <= BLOCK_MM bars every move toward it (front: forward;
   // a 45 deg beam: forward and sideways to its side; a side: sideways to it) until it reads > 2 x.
   uint8_t blocked;     // bit per sensor
-  uint8_t ignored;     // bit per sensor: blocked by something on the robot (a reading that does not move with it)
   bool cornered;       // the last forward drive ended at a wall (corner stop or 2 cm rule)
   void noteWalls(const int16_t* z);
   bool towardWall(int8_t x, int8_t y) const;
