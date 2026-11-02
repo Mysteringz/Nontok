@@ -80,6 +80,19 @@ static const uint8_t US_COUNT=5,trig[US_COUNT]={48,40,22,10,6},echo[US_COUNT]={4
 // Consecutive pings face 90-135 deg apart, so a 15 ms gap avoids cross-talk and all five
 // fit the 200 ms sample: front-left, right side, front, left side, front-right.
 static const uint8_t PING_ORDER[US_COUNT]={0,4,2,3,1};
+// Sensor self-check, shown on the OLED and reported as "chk" (bit k = ultrasonic k, bits 5-8 = adc[0..3],
+// bit 9 = colour): an ultrasonic is OK once it has returned a valid echo in the last 10 s (open space
+// returns none, so waving a hand in front of it proves it); an LDR is OK unless stuck at a rail; the
+// colour sensor is OK when red, green and blue all count. Updated by sample().
+static uint32_t usSeenAt[US_COUNT]={};static bool ldrOk[4]={},clrOk=false;
+static bool usOk(uint8_t k) { return usSeenAt[k]&&millis()-usSeenAt[k]<10000UL; }
+static uint16_t checkMask() {
+  uint16_t m=0;
+  for(uint8_t k=0;k<US_COUNT;++k) if(usOk(k)) m|=uint16_t(1)<<k;
+  for(uint8_t i=0;i<4;++i) if(ldrOk[i]) m|=uint16_t(1)<<(5+i);
+  if(clrOk) m|=uint16_t(1)<<9;
+  return m;
+}
 static const uint8_t light[]={A0,A7,A2,A6}; // LDRs; physically left to right A0,A2,A7,A6 (page reorders). Higher ADC = brighter. A1/A3 not used, A4/A5 are M4.
 // User-reported 2026-10-23: gyro INT wire on D33 (PC4, polled; no interrupt on PORTC).
 static const uint8_t gyroInt=33;
@@ -444,7 +457,7 @@ static void compactSample(Print& o,const uint16_t* adc,const int16_t* us,const u
   o.print(F(",\"bus_errors\":"));o.print(busErrors);
   o.print(F(",\"i2c_timeouts\":"));o.print(i2cTimeouts);o.print(F(",\"gyro_restarts\":"));o.print(gyroRestarts);
   o.print(F(",\"gyro_resets\":"));o.print(gyroResets);o.print(F(",\"bias_valid\":"));o.print(biasValid);
-  o.print(F("},\"color_rgbc\":"));list(o,rgbc,4);o.print(F(",\"start_btn\":"));o.print(btnReport);o.print(F(",\"btn_pins\":"));o.print(btnPinsReport);ttReport(o);stepReport(o);o.println('}');
+  o.print(F("},\"color_rgbc\":"));list(o,rgbc,4);o.print(F(",\"start_btn\":"));o.print(btnReport);o.print(F(",\"btn_pins\":"));o.print(btnPinsReport);o.print(F(",\"chk\":"));o.print(checkMask());ttReport(o);stepReport(o);o.println('}');
 }
 // Bluetooth's 9600 baud carries ~960 bytes/s: a full sample (~400 bytes) goes once a second
 // and this ~62-byte line fills the other four of five, so the console still updates at 5 Hz.
@@ -668,7 +681,8 @@ static void sample() {
     if(i) for(uint32_t t=millis();millis()-t<15;) service();
     us[PING_ORDER[i]]=range(PING_ORDER[i]);
   }
-  for(uint8_t i=0;i<US_COUNT;++i) usLatest[i]=us[i];
+  for(uint8_t i=0;i<US_COUNT;++i) { usLatest[i]=us[i];if(us[i]>0) usSeenAt[i]=millis(); }
+  for(uint8_t i=0;i<4;++i) ldrOk[i]=value[i]>=10&&value[i]<=1010;
   ++usSeq;service();
   // Channels R, G, B, clear; 3 ms filter settling, then 96 bursts (6.912 ms exposure).
   // Skipped during a step so ranges update faster; the last reading is repeated.
@@ -683,6 +697,7 @@ static void sample() {
     }
     service();
   }
+  if(stepKind==STEP_IDLE) clrOk=rgbc[0]>0&&rgbc[1]>0&&rgbc[2]>0;
   Serial.print(F("{\"type\":\"sample\",\"ms\":"));Serial.print(millis());
   Serial.print(F(",\"boot\":\""));Serial.print(bootCause);Serial.print('"');
   Serial.print(F(",\"motors\":\"PWM_LOW\",\"light_pins\":[\"A0\",\"A7\",\"A2\",\"A6\"],\"adc\":["));
@@ -690,6 +705,7 @@ static void sample() {
   Serial.print(F("],\"ultrasonic_mm\":"));list(Serial,us,US_COUNT);
   Serial.print(F(",\"gyro\":"));gyroService();readAccel();gyroReport(); // No output mid-line.
   Serial.print(F(",\"start_btn\":"));Serial.print(btnReport);Serial.print(F(",\"btn_pins\":"));Serial.print(btnPinsReport);
+  Serial.print(F(",\"chk\":"));Serial.print(checkMask());
   Serial.print(F(",\"color_out_pin\":32,\"color_rgbc\":["));
   for(uint8_t i=0;i<4;++i) { if(i) Serial.print(',');Serial.print(rgbc[i]); }
   Serial.print(']');
@@ -933,7 +949,13 @@ static uint8_t notReady() {
   if(!calValid) return 1;
   if(!gyroRunning) return 2;
   if(!biasValid) return 3;
+  if(!usOk(2)) return 4;   // front ultrasonic: the approach and wall sweep need it
+  if(!clrOk) return 5;     // colour sensor: the turn decision needs it
   return 0;
+}
+static const __FlashStringHelper* notReadyName(uint8_t n) {
+  switch(n) { case 1: return F("no_cal");case 2: return F("no_gyro");case 3: return F("gyro_zeroing");
+              case 4: return F("no_front_echo");default: return F("no_colour"); }
 }
 static uint8_t btnPressMask=0;
 static void buttonEvent(const __FlashStringHelper* action) {
@@ -952,7 +974,7 @@ static void buttonService() {
   else if(autorunPending) { autorunPending=false;digitalWrite(AUTORUN_LED,LOW);buttonEvent(F("cancel")); }
   else if(uint8_t nr=notReady()) {   // only in the ready mode (the OLED says READY)
     out.print(F("{\"type\":\"button\",\"action\":\"refused\",\"why\":\""));
-    out.print(nr==1?F("no_cal"):nr==2?F("no_gyro"):F("gyro_zeroing"));out.println(F("\"}"));
+    out.print(notReadyName(nr));out.println(F("\"}"));
   }
   else {
     uiResult=0;autorunPending=true;autorunUsbCancels=false;autorunAt=now+AUTORUN_MS;
@@ -964,7 +986,8 @@ static void buttonService() {
 // only the rows that changed, and given up for good after any I2C timeout.
 static U8X8_SSD1306_128X32_UNIVISION_HW_I2C oled(U8X8_PIN_NONE);
 static bool oledOk=false;static uint32_t oledLastMs=0;
-static char shownWord[9]={1},shownL2[17]={1},shownL3[17]={1};   // never equal to a real text: first draw
+static char shownWord[9]={1},shownL2[17]={1},shownL3[17]={1},shownBt[7]={1};   // never equal to a real text: first draw
+static bool oledBigRedrawn=false;
 static void oledBegin() {
   Wire.beginTransmission(0x3c);
   bool fitted=Wire.endTransmission()==0;
@@ -975,13 +998,24 @@ static void oledBegin() {
   i2cBegin();   // begin() restarted the bus: back to 100 kHz with the 25 ms timeout
   oledOk=true;
 }
-static void oledPut(uint8_t row,char* shown,const char* want,uint8_t width,bool big) {
+static void oledPut(uint8_t col,uint8_t row,char* shown,const char* want,uint8_t width,bool big) {
   char pad[17];uint8_t n=strlen(want);
   for(uint8_t i=0;i<width;++i) pad[i]=i<n?want[i]:' ';
   pad[width]=0;
   if(!strcmp(pad,shown)) return;
-  if(big) oled.draw2x2String(0,row,pad);else oled.drawString(0,row,pad);
+  if(big) { oled.draw2x2String(col,row,pad);oledBigRedrawn=true; } else oled.drawString(col,row,pad);
   strcpy(shown,pad);
+}
+// Sensor rows of the READY screen, o = OK, x = not: ultrasonics left to right (left side, left 45,
+// front, right 45, right side), then the four LDRs left to right (adc[0,2,1,3]) and the colour sensor.
+static void sensorRows(char* l2,char* l3) {
+  static const uint8_t usOrder[5]={3,0,2,1,4},ldrOrder[4]={0,2,1,3};
+  strcpy(l2,"US ");uint8_t n=3;
+  for(uint8_t i=0;i<5;++i) { l2[n++]=usOk(usOrder[i])?'o':'x';if(i<4) l2[n++]=' '; }
+  l2[n]=0;
+  strcpy(l3,"LDR ");n=4;
+  for(uint8_t i=0;i<4;++i) l3[n++]=ldrOk[ldrOrder[i]]?'o':'x';
+  strcpy(l3+n," CLR ");n+=5;l3[n++]=clrOk?'o':'x';l3[n]=0;
 }
 static void oledService() {
   if(!oledOk||motorsLive||pulsing||millis()-oledLastMs<150) return;
@@ -1005,11 +1039,15 @@ static void oledService() {
     case 1: strcpy(word,"NO CAL");strcpy(l2,"SEND CALSAVE");break;
     case 2: strcpy(word,"NO GYRO");strcpy(l2,"CHECK I2C");break;
     case 3: strcpy(word,"ZEROING");strcpy(l2,"KEEP STILL");break;
-    default: strcpy(word,"READY");strcpy(l2,"PRESS BUTTON");strcpy(l3,btHostPresent()?"BT OK":"BT --");
+    case 4: strcpy(word,"CHECK");strcpy(l2,"NO FRONT ECHO");strcpy(l3,"AIM AT THE WALL");break;
+    case 5: strcpy(word,"CHECK");strcpy(l2,"COLOUR SENSOR");strcpy(l3,"NO READING");break;
+    default: strcpy(word,"READY");sensorRows(l2,l3);
   }
-  oledPut(0,shownWord,word,8,true);
-  oledPut(2,shownL2,l2,16,false);
-  oledPut(3,shownL3,l3,16,false);
+  oledPut(0,0,shownWord,word,8,true);
+  if(oledBigRedrawn) { oledBigRedrawn=false;shownBt[0]=1; }   // the big word painted over this corner
+  if(!strcmp(word,"READY")) oledPut(10,0,shownBt,btHostPresent()?"BT OK":"BT --",6,false);   // beside READY
+  oledPut(0,2,shownL2,l2,16,false);
+  oledPut(0,3,shownL3,l3,16,false);
   if(Wire.getWireTimeoutFlag()) { i2cFailed();oledOk=false; }   // never let the display hang the gyro bus
 }
 static void commands(Stream& in,LineReader& r,bool usb) {
