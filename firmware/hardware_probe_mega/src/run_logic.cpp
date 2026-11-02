@@ -43,6 +43,7 @@ Runner::Runner(Io& io_, const Calib& cal_)
   sweepRate = 0.08f;
   memset(wcomp, 0, sizeof(wcomp));
   stopTau = 0.15f;
+  beamSlope[0] = beamSlope[1] = beamSlope[2] = 0;
   stopTauY = 0.08f;
   cornerMm = 100;  // mm: forward drives stop if a 45 deg beam reads less (corner closing on a wall)
   fixRate0[0] = 0.15f; fixRate0[1] = 0.08f; fixRate0[2] = 0.03f;   // mm/ms, mm/ms, deg/ms at FIX_PWM (learned)
@@ -1258,6 +1259,22 @@ static bool skewFrom(uint8_t set, const int16_t* a, const int16_t* b, float* deg
   return true;
 }
 
+// The stage's 45 deg heading signal: at N the difference L45 - R45 (a sideways offset moves both the same
+// way and mostly cancels), after a right turn L45, after a left turn R45. false: no echo or no reference.
+static bool beam(const int16_t* ref, uint8_t set, const int16_t* us, float* v, float* r) {
+  if (set == SET_ALL) {
+    if (us[L45] <= 0 || us[R45] <= 0 || ref[L45] == NONE || ref[R45] == NONE) return false;
+    *v = float(us[L45] - us[R45]);
+    *r = float(ref[L45] - ref[R45]);
+    return true;
+  }
+  uint8_t k = set == SET_RIGHT_TURN ? L45 : R45;
+  if (us[k] <= 0 || ref[k] == NONE) return false;
+  *v = us[k];
+  *r = ref[k];
+  return true;
+}
+
 // Placed pointing roughly at the main wall: if the front beam has no echo but a 45 deg beam does, turn
 // 15 deg toward that beam (at most 3 times) so the creep heads for the wall.
 bool Runner::faceWall(int16_t us[NUS]) {
@@ -1282,8 +1299,18 @@ bool Runner::straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS]) {
   io.event(RL_F("skew"), i16(th * 10), us[FRONT] - a[FRONT]);
   if (fabsf(th) <= 1.5f) { setGoal(y); return true; }
   setGoal(y - th);
+  int16_t was[NUS];
+  memcpy(was, us, sizeof(was));
   TRY(rotateTo(goal, ROT_TOL, false));
-  return measure(us);
+  TRY(measure(us));
+  // the turn also shows how the 45 deg beams answer to heading: mm per deg, for align's fine heading
+  float y1, b0, b1, r;
+  if (fabsf(th) >= 2 && io.yaw(&y1) && fabsf(y1 - y) >= 1.5f && beam(cal.ref[N], set, was, &b0, &r) && beam(cal.ref[N], set, us, &b1, &r)) {
+    float sl = (b1 - b0) / (y1 - y);
+    if (fabsf(sl) >= 3 && fabsf(sl) <= 40) beamSlope[set] = beamSlope[set] ? 0.5f * (beamSlope[set] + sl) : sl;
+    io.event(RL_F("beam_slope"), set, i16(sl * 10), i16(beamSlope[set] * 10));
+  }
+  return true;
 }
 
 // Heading check on a pose: a straight forward move of `dist` (front reading) and the side wall(s) of the
@@ -1414,6 +1441,7 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tol, int16_t us[NUS]) {
 // gyro heading held. An imperfect pose never ends the run: it goes on from there, logged.
 bool Runner::align(Pose pose, uint8_t set, float target, float dead, uint8_t maxMoves, int16_t us[NUS]) {
   float best = 0;
+  uint8_t beamFixes = 0;
   for (uint8_t move = 0;; ++move) {
     TRY(measureFine(us, move > 0));
     float d[NUS], ex, ey;
@@ -1423,6 +1451,20 @@ bool Runner::align(Pose pose, uint8_t set, float target, float dead, uint8_t max
     float acc = accuracySet(pose, set, us);
     if (acc > best) best = acc;
     io.event(RL_F("align"), pose * 100 + move, hx ? i16(ex) : NONE, hy ? i16(ey) : NONE, i16(acc));
+    // In position (front and side within 12 mm): the 45 deg beams against the capture give the heading
+    // left over, with the slope learned from the straighten turns (at most 2 such turns, 5 deg each).
+    float bv, br;
+    if (beamFixes < 2 && hx && hy && fabsf(ex) <= 12 && fabsf(ey) <= 12 && beamSlope[set] != 0 &&
+        beam(cal.ref[pose], set, us, &bv, &br) && fabsf(bv - br) > 6) {
+      float dth = clampf(-(bv - br) / beamSlope[set], -5, 5);
+      if (fabsf(dth) > 1.5f) {
+        ++beamFixes;
+        io.event(RL_F("beam_fix"), pose, i16(bv - br), i16(dth * 10));
+        setGoal(goal + dth);
+        TRY(rotateTo(goal, ROT_TOL, false));
+        continue;
+      }
+    }
     bool inBand = hx && hy && fabsf(ex) <= dead && fabsf(ey) <= dead;
     if (acc >= target || inBand || move >= maxMoves || (!hx && !hy)) {
       io.event(RL_F("aligned"), pose, i16(acc), i16(best), acc >= target ? 1 : 0);
@@ -1495,6 +1537,7 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     if (turnDir == 0) return fail(RL_F("no_turn_direction"));
     Pose box = turnDir > 0 ? BOX_LEFT : BOX_RIGHT;
     uint8_t set = turnDir > 0 ? SET_LEFT_TURN : SET_RIGHT_TURN;
+    beamSlope[set] = 0;   // the box's beams see other surfaces than at the turned checkpoint: learn afresh
     TRY(measure(us));
     memcpy(a, us, sizeof(a));
     TRY(walkTo(cal.ref[box][FRONT] + 150, us));                       // 6: straight, slowly

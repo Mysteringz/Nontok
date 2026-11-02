@@ -195,6 +195,7 @@ class Runner {
   int16_t snapSum;     // driveForward: side-wall spacing (L + R) to snapshot at, 0 = off
   bool snapped;        // driveForward saw both side walls at that spacing: snap holds front / sides then
   int16_t snap[NUS];
+  float beamSlope[3];  // mm of the stage's 45 deg reading per deg CCW, learned from each straighten turn (0 = unknown)
 };
 
 }  // namespace rl
