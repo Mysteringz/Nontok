@@ -1,0 +1,128 @@
+{
+  "ref_order": [
+    "front",
+    "side_left",
+    "side_right",
+    "left",
+    "right"
+  ],
+  "no_ref": 9999,
+  "raw_captures": "field-2026-11-02c.jsonl",
+  "targets": {
+    "p_point": {
+      "label": "Checkpoint P (centre of semicircle)",
+      "captured": "2026-10-30T05:53:51.877419+00:00",
+      "note": "P, centre of semicircle, facing down field; USB 30 Oct",
+      "samples": 25,
+      "warnings": [
+        "side_left ultrasonic: 25 of 25 samples had no echo",
+        "side_right ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 1004,
+        "side_left": 9999,
+        "side_right": 1291,
+        "left": 872,
+        "right": 1027
+      },
+      "color_rg_ratio": 1.074
+    },
+    "centre": {
+      "label": "Checkpoint N (colour plate)",
+      "captured": "2026-11-02T15:48:01.461589+00:00",
+      "note": "",
+      "samples": 25,
+      "warnings": [
+        "right ultrasonic varies > 15 mm: something moved?",
+        "side_right ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 264,
+        "side_left": 625,
+        "side_right": 676,
+        "left": 641,
+        "right": 716
+      },
+      "color_rg_ratio": 1.547
+    },
+    "turned_left": {
+      "label": "N turned left (faces left wall)",
+      "captured": "2026-11-02T15:48:59.761669+00:00",
+      "note": "",
+      "samples": 25,
+      "warnings": [
+        "left ultrasonic varies > 15 mm: something moved?",
+        "right ultrasonic varies > 15 mm: something moved?",
+        "side_left ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 572,
+        "side_left": 680,
+        "side_right": 215,
+        "left": 9999,
+        "right": 651
+      },
+      "color_rg_ratio": 1.085
+    },
+    "left_box": {
+      "label": "Left parking box",
+      "captured": "2026-11-02T15:50:26.596597+00:00",
+      "note": "",
+      "samples": 25,
+      "warnings": [
+        "left ultrasonic varies > 15 mm: something moved?",
+        "side_left ultrasonic: 23 of 25 samples had no echo",
+        "side_left ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 52,
+        "side_left": 9999,
+        "side_right": 214,
+        "left": 936,
+        "right": 277
+      },
+      "color_rg_ratio": 1.036
+    },
+    "turned_right": {
+      "label": "N turned right (faces right wall)",
+      "captured": "2026-11-02T15:49:32.193894+00:00",
+      "note": "",
+      "samples": 25,
+      "warnings": [
+        "right ultrasonic varies > 15 mm: something moved?",
+        "side_right ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 625,
+        "side_left": 206,
+        "side_right": 683,
+        "left": 626,
+        "right": 9999
+      },
+      "color_rg_ratio": 1.061
+    },
+    "right_box": {
+      "label": "Right parking box",
+      "captured": "2026-11-02T15:50:01.639053+00:00",
+      "note": "",
+      "samples": 20,
+      "warnings": [
+        "right ultrasonic varies > 15 mm: something moved?",
+        "side_right ultrasonic varies > 15 mm: something moved?"
+      ],
+      "ref": {
+        "front": 53,
+        "side_left": 212,
+        "side_right": 1239,
+        "left": 238,
+        "right": 1354
+      },
+      "color_rg_ratio": 1.073
+    }
+  },
+  "colour_milli": {
+    "green": 857,
+    "red": 1737,
+    "note": "centre captures 2 Nov 11:19 (green) and 11:20 (red) at N"
+  }
+}

@@ -16,7 +16,8 @@ side wall (measured at the wheel)**, parallel. Touching a wall = disqualified.
 ## 3. Where things are
 - Run logic: `firmware/hardware_probe_mega/src/run_logic.cpp`, `Runner::run()` — read this first.
 - Hardware side: `firmware/hardware_probe_mega/src/main.cpp`.
-- Calibration: `calibration/field-2026-11-02b.json` (stored on the robot).
+- Calibration: `calibration/field-2026-11-02c.json` (stored on the robot, 2 Nov 23:50: all poses recaptured
+  in one session; the turned captures before it came from an older N and were up to 40 mm off).
 - Good version: commit `a8e454b`, tag `good-2026-11-02_2017`; zip `~/Downloads/Nontok_good_2026-11-02_2017.zip`.
 
 ## 4. What the robot does (good version)
@@ -35,12 +36,13 @@ Safety: forward drives stop if a 45° sensor sees a wall under 100 mm.
 ## 5. Calibration on the robot
 | Position | Front | Left side | Right side | Left 45° | Right 45° |
 |---|---|---|---|---|---|
-| N | 277 | 630 | 690 | 653 | 719 |
-| Left box | 53 | – | 220 | 135 | 265 |
-| Right box | 52 | 217 | – | – | – |
+| N | 264 | 625 | 676 | 641 | 716 |
+| N turned left | 572 | – | 215 | – | 651 |
+| Left box | 52 | – | 214 | 936 | 277 |
+| N turned right | 625 | 206 | – | 626 | – |
+| Right box | 53 | 212 | – | 238 | 1354 |
 
-Colour references: green 0.857, red 1.737 (red ÷ green). Right box uses front + left side only (its 45°s
-were unstable).
+Colour references: green 0.857, red 1.737 (red ÷ green), kept from `field-2026-11-02b.json`.
 
 ## 6. How to
 - Console: `./tools/start_console.sh`, open http://127.0.0.1:8766.
