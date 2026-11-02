@@ -168,7 +168,9 @@ class Runner {
   bool seek(Pose pose, bool creep, float tol, int16_t us[NUS]);
   bool settle(Pose pose, uint8_t moves, int16_t us[NUS], float target = 88, float dead = 15);
   bool turnOnce(bool ccw);
+  bool squareToSides();
   float fixRate[3], fixRate0[3];
+  float cornerMm;
   float accuracySet(Pose pose, uint8_t set, const int16_t us[NUS]) const;
   bool measureFine(int16_t us[NUS], bool twice);
   bool fixPose(Pose pose, uint8_t set, float target, uint8_t maxMoves, int16_t us[NUS]);

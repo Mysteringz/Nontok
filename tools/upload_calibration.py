@@ -44,7 +44,11 @@ def send(command, ack, seq):
 
 
 def main():
-    targets = json.load(open(sys.argv[1]))["targets"]
+    global GREEN_MILLI, RED_MILLI
+    data = json.load(open(sys.argv[1]))
+    targets = data["targets"]
+    if "colour_milli" in data:   # measured red/green references (centre captures on each pad)
+        GREEN_MILLI, RED_MILLI = data["colour_milli"]["green"], data["colour_milli"]["red"]
     seq = get("/api/lines?after=0")["seq"]
     _, seq = send(WMAP, "wmap", seq)
     sent = []

@@ -10,7 +10,7 @@ namespace rl {
 
 static const uint8_t PWM_X = 85, PWM_Y = 80;   // timed strafe; 2 Nov field: 100 was twice too fast
 static const float HOLD_TOL = 2.0f;     // deg: brake-ended pulses sized by the move model turn ~1 deg at the least
-static const float ROT_TOL = 0.8f;      // deg: where a correction aims to finish
+static const float ROT_TOL = 1.5f;      // deg: where a correction aims to finish (2 Nov field: 0.8 kept overshooting)
 static const float ROT_COARSE_DEG = 15; // more than this: one long smooth pulse at the coarse power
 static const float FRACTION = 0.85f;    // cover this share of the error per timed translation
 static const uint16_t T_MIN = 50, T_MAX = 300;    // timed translations: long moves veer
@@ -18,9 +18,9 @@ static const uint16_t ROT_T_MAX = 2100; // ms: + ramp-down and brake stays insid
 static const float DRIVE_MAX_MS = 2000; // ms: short correcting drives stay inside the gyro FIFO
 static const float CREEP_MAX_MS = 20000; // ms: one continuous creep to N or into the box (the gyro FIFO may
                                          // overflow: the heading is then re-based, not corrected, on the way)
-static const uint8_t CREEP_FLOOR = 42;   // PWM: creep speed at the target, raised if the robot does not move
+static const uint8_t CREEP_FLOOR = 41;   // PWM: creep speed at the target, raised if the robot does not move
 static const int16_t SIDE_WINDOW = 250; // a side reading this far off its target is another surface
-static const uint8_t DRIVE_PWM = 47;    // every forward drive (creep top speed); 2 Nov field: 52 was twice too fast
+static const uint8_t DRIVE_PWM = 45;    // creep top speed; 2 Nov field: 52 twice too fast, 47 a tiny bit too fast
 static const uint8_t SIDE_PWM = 68;     // continuous strafes; 2 Nov field: 80 was twice too fast
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -33,13 +33,18 @@ Runner::Runner(Io& io_, const Calib& cal_)
   // Field 30 Oct: 120 / 80 PWM turned the robot; 80 PWM turned ~7 deg in a 120 ms coasting pulse.
   // 2 Nov field: 110 / 80 PWM turned far too fast; ~1/5 of that speed: just above breakaway (raised by
   // rotateTo if the robot does not turn at all)
-  rotPwm[0] = 62; rot[0].init(0.04f, 75);   // deg/ms
-  rotPwm[1] = 56; rot[1].init(0.02f, 70);
+  // 2 Nov run: 62 / 56 PWM turned ~0.1 deg/ms (100 deg/s) and the first turns overshot: lower power,
+  // rates from that run as the starting point (still raised if the robot does not turn)
+  // 62 / 56 PWM (2 Nov field: 54 / 50 under-turned). Starting rates measured on the 2 Nov run at these
+  // powers (0.096 / ~0.105 deg/ms): with lower guesses the first long turn ran ~2x too far.
+  rotPwm[0] = 62; rot[0].init(0.096f, 75);   // deg/ms
+  rotPwm[1] = 56; rot[1].init(0.105f, 70);
   rotMinMs[0] = rotMinMs[1] = 0;
   sweepRate = 0.08f;
   memset(wcomp, 0, sizeof(wcomp));
   stopTau = 0.15f;
   stopTauY = 0.08f;
+  cornerMm = 100;  // mm: forward drives stop if a 45 deg beam reads less (corner closing on a wall)
   fixRate0[0] = 0.15f; fixRate0[1] = 0.08f; fixRate0[2] = 0.03f;   // mm/ms, mm/ms, deg/ms at FIX_PWM (learned)
   for (uint8_t i = 0; i < 3; ++i) fixRate[i] = fixRate0[i];   // cautious until learned: 2 Nov the robot rolled ~20 cm after a stop from 380 mm/s
 }
@@ -220,7 +225,7 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
     if (s * (d + v * stopTau - stopAt) <= 3) break;   // predicted distance after stopping
     if (z[FRONT] > 0 && s * (z[FRONT] - stopAt) < -10) break;   // a raw echo already past the target: stop, whatever the filter says
     // a corner closing on a wall at an angle: either 45 deg beam (filtered, 2+ echoes) under 100 mm
-    if (s > 0 && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < 100) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < 100))) {
+    if (s > 0 && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm))) {
       io.event(RL_F("corner_stop"), i16(kf[L45].dist()), i16(kf[R45].dist()));
       break;
     }
@@ -257,12 +262,22 @@ bool Runner::learn(uint8_t axis, bool hasBefore, float before, bool hasAfter, fl
 bool Runner::hold(int16_t us[NUS]) {
   float y;
   if (!io.yaw(&y)) return true;
-  if (!goalSet || io.lost() != goalLost) {
-    if (goalSet) io.event(RL_F("gyro_rebase"), i16(y * 10));
-    setGoal(y);
+  if (!goalSet) setGoal(y);
+  else if (io.lost() != goalLost) {
+    // Gyro samples were dropped (FIFO overflow on a long creep). Keep the heading goal (option A,
+    // 2 Nov): on a straight creep the robot barely turns, so the dropped samples cost little, and
+    // re-basing would throw away the heading the robot must point back to.
+    io.event(RL_F("gyro_overflow_kept_goal"), i16(y * 10), i16(goal * 10));
+    goalLost = io.lost();
   }
   if (fabsf(goal - y) <= HOLD_TOL) return true;
   io.event(RL_F("hold"), i16(y * 10), i16(goal * 10));
+  // Near a wall (front under 150 mm) a turn swings the front corners into it (2 Nov: the left box
+  // corner touched the side wall): at most 3 deg there per correction.
+  if (us[FRONT] > 0 && us[FRONT] < 150) {
+    TRY(rotateTo(y + clampf(goal - y, -3, 3), ROT_TOL, false));
+    return measure(us);
+  }
   TRY(rotateTo(goal, ROT_TOL, true));
   return measure(us);
 }
@@ -302,12 +317,12 @@ bool Runner::rotateTo(float target, float tol, bool strict, float* reached) {
     } else rotMinMs[p] = 0;
     rot[p].learn(used, turned > 0 ? turned : 0);
   }
-  if (!strict) {
-    float y;
-    if (reached && io.yaw(&y)) *reached = y;
-    return true;
-  }
-  return fail(RL_F("rotation_not_reached"));
+  // not reached: never stop the run for it (2 Nov field: ROTATION_NOT_REACHED stopped a run at N);
+  // carry on from the closest heading, logged
+  float y;
+  if (io.yaw(&y)) { if (reached) *reached = y; io.event(RL_F("rotation_best_effort"), i16((target - y) * 10)); }
+  (void)strict;
+  return true;
 }
 
 // The gentlest rotation that measurably turns the robot (>= 1.5 deg): the fine model's length for
@@ -347,6 +362,7 @@ bool Runner::squareToBeams(Pose pose, int16_t us[NUS]) {
     if (turned) {
       for (uint8_t b = 0; b < 2; ++b) {
         if (!use[b] || us[b] <= 0 || us1[b] <= 0 || fabsf(float(us1[b] - us[b])) < 10) continue;
+        if (fabsf(float(us1[b] - ref[b])) > 150) continue;   // far off its target: another surface, not heading (2 Nov: +25 deg turn)
         float s = (us1[b] - us[b]) / (y1 - y0);
         if (fabsf(s) < 4 || fabsf(s) > 25) continue;
         slopes[b] = s;
@@ -361,7 +377,17 @@ bool Runner::squareToBeams(Pose pose, int16_t us[NUS]) {
       TRY(rotateTo(goal0, 2, false));
       return measure(us);
     }
-    float fix = clampf(nfix == 2 ? (fixes[0] + fixes[1]) / 2 : fixes[0], -25, 25);
+    if (nfix == 1 && fabsf(fixes[0]) > 8) {   // one beam alone asking for a big turn: not trusted
+      io.event(RL_F("beams_one_big"), i16(fixes[0] * 10));
+      nfix = 0;
+    }
+    if (nfix == 0) {
+      if (!hadGoal) { memcpy(us, us1, sizeof(int16_t) * NUS); return true; }
+      setGoal(goal0);
+      TRY(rotateTo(goal0, 2, false));
+      return measure(us);
+    }
+    float fix = clampf(nfix == 2 ? (fixes[0] + fixes[1]) / 2 : fixes[0], -12, 12);   // field limit (30 Oct)
     io.event(RL_F("beams_fix"), pose, i16(slopes[0] * 10), i16(slopes[1] * 10), i16(fix * 10));
     setGoal(y1 + fix);
     if (fabsf(fix) <= 1.5f) { memcpy(us, us1, sizeof(int16_t) * NUS); return true; }
@@ -1093,6 +1119,58 @@ bool Runner::fixPose(Pose pose, uint8_t set, float target, uint8_t maxMoves, int
   }
 }
 
+// Straighten at N from the two side walls (2 Nov field: the 45 deg beams gave wrong or no heading,
+// and a 25-30 deg start error survived to the box). A side sensor reads its wall's perpendicular
+// distance while the wall's normal is inside its beam (half-width c), D / cos(|yaw - psi| - c) beyond;
+// both side walls are parallel, so both share the straight heading psi. Readings at 5 headings
+// (-20, -10, 0, +10, +20 deg, measured while still), then psi and c fitted over both sides
+// (residuals capped at 60 mm); one turn onto psi. A poor fit keeps the heading.
+static float sideCost(const float* yaws, const int16_t* v, uint8_t n, float psi, float c) {
+  int16_t d = 32767;
+  uint8_t m = 0;
+  for (uint8_t i = 0; i < n; ++i) if (v[i] > 0) { if (v[i] < d) d = v[i]; ++m; }
+  if (m < 3) return -1;
+  float cost = 0;
+  for (uint8_t i = 0; i < n; ++i) {
+    if (v[i] <= 0) continue;
+    float off = fabsf(yaws[i] - psi) - c;
+    float model = off > 0 ? d / cosApprox(off * DEG) : d;
+    float r = fabsf(v[i] - model);
+    cost += r < 60 ? r : 60;
+  }
+  return cost / m;
+}
+
+bool Runner::squareToSides() {
+  float y0;
+  if (!io.yaw(&y0)) return true;
+  float yaws[5];
+  int16_t ls[5], rs[5], us[NUS];
+  const float off[5] = {-20, -10, 0, 10, 20};
+  for (uint8_t i = 0; i < 5; ++i) {
+    TRY(rotateTo(y0 + off[i], 1.5f, false));
+    TRY(measure(us));
+    if (!io.yaw(&yaws[i])) return true;
+    ls[i] = us[LSIDE];
+    rs[i] = us[RSIDE];
+    io.event(RL_F("side_look"), i16((yaws[i] - y0) * 10), ls[i], rs[i]);
+  }
+  float best = 1e9f, bestPsi = y0, bestC = 8;
+  for (float c = 4; c <= 12.01f; c += 2)
+    for (float psi = y0 - 40; psi <= y0 + 40.01f; psi += 0.5f) {
+      float a = sideCost(yaws, ls, 5, psi, c), b = sideCost(yaws, rs, 5, psi, c);
+      float cost = a >= 0 && b >= 0 ? (a + b) / 2 : a >= 0 ? a : b;
+      if (cost >= 0 && cost < best) { best = cost; bestPsi = psi; bestC = c; }
+    }
+  io.event(RL_F("side_square"), i16((bestPsi - y0) * 10), i16(bestC * 10), i16(best * 10));
+  if (best > 25) {   // the side walls do not explain the readings: keep the heading
+    TRY(rotateTo(y0, 1.5f, false));
+    return true;
+  }
+  setGoal(bestPsi);
+  return rotateTo(bestPsi, ROT_TOL, false);
+}
+
 // The colour turn in one smooth motion: a single coarse pulse sized by the rotation model for the
 // whole 90 deg, then a fine correction only if it ended more than 3 deg off.
 bool Runner::turnOnce(bool ccw) {
@@ -1103,48 +1181,41 @@ bool Runner::turnOnce(bool ccw) {
   if (!io.yaw(&y)) return fail(RL_F("gyro_not_valid_for_the_turn"));
   float want = fabsf(goal - y);
   uint16_t used;
-  TRY(pulse(0, 0, ccw ? 100 : -100, rotPwm[0], rot[0].msFor(want), &used, 40, ROT_T_MAX));
+  // one smooth pulse for ~85 % of the turn (an over-estimated turn cannot overshoot), the gyro check finishes it
+  TRY(pulse(0, 0, ccw ? 100 : -100, rotPwm[0], rot[0].msFor(0.85f * want), &used, 40, ROT_T_MAX));
   if (io.yaw(&a)) { float t = (a - y) * (ccw ? 1 : -1); rot[0].learn(used, t > 0 ? t : 0); }
-  if (io.yaw(&a) && fabsf(goal - a) > 3) TRY(rotateTo(goal, 1.5f, true, &a));
+  // check the turn on the gyro and correct it (slow fine turns) until within 0.8 deg
+  if (io.yaw(&a) && fabsf(goal - a) > ROT_TOL) TRY(rotateTo(goal, ROT_TOL, true, &a));
   io.event(RL_F("turned"), ccw, i16((a - start) * 10));
   return true;
 }
 
-// Walk forward to `target` on the front sensor by short timed moves (<= 150 mm each, measured while
-// still between them: no creeping), the gyro heading held inside each move.
+// Creep forward until the front reads `target` (+-15 mm): one continuous slow drive that slows as it
+// closes in (driveForward), again if it stopped short; the heading is held between creeps while clear
+// of the wall.
 bool Runner::walkTo(int16_t target, int16_t us[NUS]) {
   for (uint8_t t = 0; t < 3 && us[FRONT] <= 0; ++t) TRY(measure(us));
-  for (uint8_t move = 0; move < 20; ++move) {
+  for (uint8_t move = 0; move < 12; ++move) {
     if (us[FRONT] <= 0) { TRY(measure(us)); if (us[FRONT] <= 0) return true; continue; }
-    float ex = float(us[FRONT] - target);
-    if (ex <= 15) return true;
-    float dx = clampf(0.8f * ex, 0, 150), y0, y1;
-    float dth = 0;
-    if (io.yaw(&y0)) dth = clampf(goal - y0, -10, 10);
-    float cx = dx / fixRate[0], cw = fabsf(dth) / fixRate[2], cmax = cx > cw ? cx : cw;
-    int8_t mx = int8_t(roundf(100 * cx / cmax)), mw = int8_t((dth > 0 ? 1 : -1) * roundf(100 * cw / cmax));
-    int16_t was = us[FRONT];
-    uint16_t used;
-    TRY(pulse(mx, 0, mw, FIX_PWM, clampf(cmax + FIX_DEAD, 60, 900), &used, 60, 900));
-    TRY(measure(us));
-    float eff = mx / 100.0f * (used - FIX_DEAD);
-    if (us[FRONT] > 0 && eff > 25 && was - us[FRONT] > 0) fixRate[0] = clampf(0.6f * fixRate[0] + 0.4f * (was - us[FRONT]) / eff, fixRate0[0] / 4, fixRate0[0] * 4);
-    io.event(RL_F("walk"), was, us[FRONT], i16(target), io.yaw(&y1) ? i16((goal - y1) * 10) : NONE);
+    if (us[FRONT] - target <= 15) return true;
+    TRY(driveForward(target, CREEP_MAX_MS, DRIVE_PWM, us));
+    if (us[FRONT] > 150) TRY(hold(us));
   }
   return true;
 }
 
-// GAME PLAN (2 Nov):
-//  1 walk forward a set distance (to 30 mm short of N's front reading) by short timed moves
-//  2 when a front ultrasonic is close enough, heading straight from the 45 deg beams against N's
-//    calibration: one ~2 deg probe turn measures mm per deg, then one correcting turn (no sweep:
-//    on the field it was too fast to be useful)
-//  3 position correction at N (all five sensors): combined translation + rotation moves, > 95 %
+// GAME PLAN (2 Nov, creep / point forward / translate):
+//  1 creep forward to 30 mm short of N's front reading (one slow drive, slowing in)
+//  2 when close, translate onto N, then point straight from the 45 deg beams (at most 12 deg, a beam far
+//    off its target ignored); the side-wall check (squareToSides) is kept but not used
+//  3 translate onto N by damped straight and sideways moves (> 95 %), point straight again, translate
 //  4 read the colour
-//  5 turn 90 deg in one motion by the colour (green left, red right)
-//  6 position correction at the turned checkpoint (front, 45 and side on the turn's side), > 95 %
-//  7+8 into the box by the same feedback moves (short timed moves, no creeping), > 98 %
-// Steps first..last map to 1-2 (walk + sweep), 3-4 (N + colour), 5-6 (turn + check), 7-8 (park).
+//  5 turn 90 deg in one slow motion, check it on the gyro and correct to within 0.8 deg
+//  6 creep forward slowly toward the box, stopping 150 mm out
+//  7 there: skew measured from the side sensor over the creep, turned out; strafe onto the box's line;
+//    then creep on to the box's front reading (+20 mm);
+//    closer than 150 mm a heading correction turns at most 3 deg
+//  8 translate into the box (damped moves, > 92 %)
 // An imperfect position never ends the run: each settle reports its accuracy and the run goes on.
 bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
   why = 0;
@@ -1159,11 +1230,16 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     TRY(walkTo(nFront + 30, us));                                      // 1
     bool close = (us[FRONT] > 0 && us[FRONT] < nFront + 300) ||
                  (us[L45] > 0 && us[L45] < cal.ref[N][L45] + 200) || (us[R45] > 0 && us[R45] < cal.ref[N][R45] + 200);
-    if (close) TRY(squareToBeams(N, us));                              // 2: no sweep
+    // 2 Nov run: straightening before the robot was on N mistook a sideways offset for heading, so
+    // translate first (front and side walls do not depend on the heading much), then straighten
+    if (close) {
+      TRY(settle(N, 5, us, 95, 10));
+      TRY(squareToBeams(N, us));                                       // 2: straight from the 45 deg beams (side-wall check removed 2 Nov)
+    }
   }
   if (first <= 2 && last >= 2) {
     io.event(RL_F("step"), 2);
-    TRY(fixPose(N, SET_ALL, 95, 14, us));                             // 3: all five sensors, 95 %
+    TRY(settle(N, 8, us, 95, 5));                                      // 3: translate onto N
   }
   turnDir = forceTurn;
   if (first <= 3 && last >= 3) {
@@ -1177,13 +1253,38 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     io.event(RL_F("colour"), i16(rg * 1000), i16(conf * 100), turnDir);
     TRY(turnOnce(turnDir > 0));                                        // 5
     Pose turned = turnDir > 0 ? N_LEFT : N_RIGHT;
-    TRY(fixPose(turned, turnDir > 0 ? SET_LEFT_TURN : SET_RIGHT_TURN, 95, 12, us));   // 6: 3 sensors, 95 %
+    (void)turned;
   }
   if (first <= 4 && last >= 4) {
     io.event(RL_F("step"), 4);
     if (turnDir == 0) return fail(RL_F("no_turn_direction"));
     Pose box = turnDir > 0 ? BOX_LEFT : BOX_RIGHT;
-    TRY(fixPose(box, turnDir > 0 ? SET_LEFT_TURN : SET_RIGHT_TURN, 98, 18, us));     // 7+8: feedback moves, 98 %
+    cornerMm = 100;   // corner stop: 100 mm everywhere (2 Nov field: back to the further distance)
+    TRY(measure(us));
+    // Skew from the side sensor facing the main wall (2 Nov field: the front-right corner reached the
+    // wall first): driving straight it stays constant; moving F forward at a heading error d moves the
+    // robot sideways by F sin d. Measured over the creep, corrected at the 150 mm stop.
+    const uint8_t sideK = turnDir > 0 ? RSIDE : LSIDE;   // left box: right side sees the main wall
+    int16_t f0 = us[FRONT], s0 = us[sideK];
+    TRY(walkTo(cal.ref[box][FRONT] + 180, us));                       // 6: slow creep, stopping 180 mm out (2 Nov: 150 a bit late)
+    TRY(measure(us));
+    float F = float(f0 - us[FRONT]);
+    if (f0 > 0 && us[FRONT] > 0 && s0 > 0 && us[sideK] > 0 && F > 120) {
+      float dS = float(us[sideK] - s0);
+      float sn = clampf((sideK == RSIDE ? dS : -dS) / F, -0.5f, 0.5f);   // + = drifted left = heading CCW
+      float skew = asinf(sn) * 57.29578f;
+      io.event(RL_F("box_skew"), i16(skew * 10), i16(dS), i16(F));
+      if (fabsf(skew) > 1.5f) {                                        // 7: straighten with room to turn
+        setGoal(goal - skew);
+        TRY(rotateTo(goal, ROT_TOL, true));
+        TRY(measure(us));
+      }
+    } else TRY(hold(us));
+    bool usedSide;
+    TRY(driveSide(box, 0.9f, us, &usedSide));                         //    onto the box's line (side sensor)
+    TRY(hold(us));
+    TRY(walkTo(cal.ref[box][FRONT] + 20, us));                        //    then creep the rest
+    TRY(settle(box, 6, us, 92, 6));                                    // 8: translate into the box
     float yy;
     io.event(RL_F("parked"), us[FRONT], cal.ref[box][FRONT], io.yaw(&yy) && goalSet ? i16((yy - goal) * 10) : NONE);
   }
