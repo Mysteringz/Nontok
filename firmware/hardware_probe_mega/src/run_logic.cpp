@@ -124,7 +124,7 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwmFast, uint8_t pw
   float before = 0, after;
   bool hasBefore = io.yaw(&before);
   if (!io.driveStart(100, 0, w, pwm)) return fail(RL_F("stopped"));
-  uint8_t blind = 0;
+  uint8_t blind = 0, polls = 0;
   float dDecision = d0, vDecision = 0;
   bool slow = pwm == pwmSlow, ok = true;
   for (;;) {
@@ -149,6 +149,7 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwmFast, uint8_t pw
     }
     dDecision = d;
     vDecision = v;
+    if (++polls % 5 == 1 && polls < 45) io.event(RL_F("dpoll"), i16(t), z, i16(d), i16(v));   // sparse trace
     if (d + v * stopTau <= stopAt + 3) break;   // predicted distance after stopping
     if (t >= maxMs || blind >= 8) break;
   }
@@ -651,6 +652,18 @@ bool Runner::park(Pose pose, int16_t us[NUS]) {
     return true;
   }
   return fail(RL_F("park_not_finished"));
+}
+
+bool Runner::creepTest(int16_t target) {
+  int16_t us[NUS];
+  TRY(measure(us));
+  for (uint8_t i = 0; i < 8; ++i) {
+    if (us[FRONT] <= 0) return fail(RL_F("no_front_echo"));
+    if (us[FRONT] - target <= 8) { io.event(RL_F("creep_done"), us[FRONT], target); return true; }
+    TRY(driveForward(target, 800, 75, 60, us));
+  }
+  io.event(RL_F("creep_done"), us[FRONT], target);
+  return true;
 }
 
 bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {

@@ -33,6 +33,7 @@ static bool pulsing=false;   // A timed PULSE move is running; its end is report
 // loop(); STOP, '!' or a malformed line set runStop and the run ends at its next wait.
 static bool runRequested=false,runActive=false,runStop=false;
 static uint8_t runFirst=1,runLast=4;static int8_t runForceTurn=0;
+static int16_t creepTestTarget=0;   // CREEP n: >0 requests the slow-approach test instead of the run
 // Start by the reset button (or power switch): with AUTORUN ON stored, every start except a
 // watchdog reset counts down 10 s (LED D13 blinking, faster for the last 3 s), then runs.
 // Any byte on USB (bench work: plugging USB in also resets the board) or a STOP cancels it;
@@ -45,6 +46,7 @@ static uint8_t runStepNow=0,uiResult=0;static int8_t runTurnNow=0;static char ui
 static uint32_t autorunAt=0;static bool autorunPending=false;
 static bool autorunUsbCancels=false;   // power-on countdowns only; a button countdown is deliberate
 static void autorunCancel(const __FlashStringHelper* why);
+static uint8_t notReady();   // defined with the button code
 // Start button between an analog pin and GND (internal pull-up; the shield's analog row, signal and
 // GND pins of one column; never its 5 V pin). Press: start the 10 s countdown; press during the
 // countdown: cancel; press during a run: stop. Ignored for 1.5 s after boot and until released
@@ -905,6 +907,14 @@ static void command(const char* line,bool usb) {
     out.print(F("{\"type\":\"autorun\",\"armed\":"));out.print(on);out.println('}');
     return;
   }
+  if(!strncmp(line,"CREEP ",6)) {
+    int16_t v[1];
+    if(!parseInts(line+6,v,1)||v[0]<40||v[0]>600) { out.println(F("{\"error\":\"BAD_CREEP\"}"));return; }
+    if(notReady()) { out.println(F("{\"error\":\"CREEP_NOT_READY\"}"));return; }
+    creepTestTarget=v[0];runRequested=true;
+    out.print(F("{\"type\":\"creep_accepted\",\"target\":"));out.print(creepTestTarget);out.println('}');
+    return;
+  }
   if(!strcmp(line,"RUN")||!strncmp(line,"RUN ",4)) {
     int16_t v[3]={1,4,0};
     if(line[3]&&!parseInts(line+4,v,2)&&!parseInts(line+4,v,3)) { out.println(F("{\"error\":\"BAD_RUN\"}"));return; }
@@ -1208,7 +1218,8 @@ static void runTournament() {
     out.println(F("{\"type\":\"run_wait\",\"for\":\"gyro_zero\",\"note\":\"keep the robot still\"}"));
     for(uint32_t t=millis();!biasValid&&millis()-t<10000&&io.pump(););
   }
-  bool ok=runStop?false:runner.run(runFirst,runLast,runForceTurn);
+  bool ok=runStop?false:creepTestTarget>0?runner.creepTest(creepTestTarget):runner.run(runFirst,runLast,runForceTurn);
+  creepTestTarget=0;
   stopMotors();runActive=false;
   uiResult=ok?1:2;runTurnNow=runner.turn();uiReason[0]=0;
   if(!ok) { if(runner.reason()) strncpy_P(uiReason,runner.reason(),16);else strcpy(uiReason,"BY STOP");uiReason[16]=0; }

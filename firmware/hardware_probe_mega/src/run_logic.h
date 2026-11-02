@@ -92,6 +92,8 @@ class Runner {
   // Steps first..last (1 approach + square to the wall, 2 match N, 3 colour turn, 4 park). forceTurn +1/-1 picks the box when
   // step 3 is skipped. false: stopped; reason() says why (RL_F string).
   bool run(uint8_t first = 1, uint8_t last = 4, int8_t forceTurn = 0);
+  // Test of the Kalman-tracked slow approach alone: drive straight at what is ahead and stop `target` mm short.
+  bool creepTest(int16_t target);
   const char* reason() const { return why; }
   int8_t turn() const { return turnDir; }
 

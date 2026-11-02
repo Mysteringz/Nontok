@@ -29,7 +29,7 @@ COMMANDS = {"STATUS", "PROBE", "GYROINIT", "GYROZERO", "HEADING0", "STOP", "HELP
 MOTION = re.compile(r"SPIN [1-4] [+-]|(MOT|TURNTEST)( -?\d{1,3}){4}"
                     r"|WMAP( [1-4] -?1){4}|REF( \d{1,4}){5}|GO( [01]){3}( \d{1,3}){2}|TURN -?\d{1,3}( \d{1,3}){2}"
                     r"|PULSE( -?\d{1,3}){3} \d{1,3} \d{1,4}"  # timed move for the stop-and-go controller
-                    r"|CAL [0-5]( \d{1,4}){5}|CALRG \d{1,4} \d{1,4}|RUN [1-4] [1-4]( -?1| 0)?"  # run calibration, run
+                    r"|CAL [0-5]( \d{1,4}){5}|CALRG \d{1,4} \d{1,4}|RUN [1-4] [1-4]( -?1| 0)?|CREEP \d{2,3}"  # run calibration, run
                     r"|BTATN? AT[A-Z0-9+=]{0,20}")  # Bluetooth module AT command (USB only; answers only while unpaired)
 PAGE = ROOT / "tools" / "probe_dashboard.html"
 # Competition calibration: 5 s of stationary readings per pose, appended one capture per line.
