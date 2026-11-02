@@ -28,7 +28,8 @@ COMMANDS = {"STATUS", "PROBE", "GYROINIT", "GYROZERO", "HEADING0", "STOP", "HELP
 MOTION = re.compile(r"SPIN [1-4] [+-]|(MOT|TURNTEST)( -?\d{1,3}){4}"
                     r"|WMAP( [1-4] -?1){4}|REF( \d{1,4}){5}|GO( [01]){3}( \d{1,3}){2}|TURN -?\d{1,3}( \d{1,3}){2}"
                     r"|PULSE( -?\d{1,3}){3} \d{1,3} \d{1,4}"  # timed move for the stop-and-go controller
-                    r"|CAL [0-5]( \d{1,4}){5}|CALRG \d{1,4} \d{1,4}|RUN [1-4] [1-4]( -?1| 0)?")  # run calibration, run
+                    r"|CAL [0-5]( \d{1,4}){5}|CALRG \d{1,4} \d{1,4}|RUN [1-4] [1-4]( -?1| 0)?"  # run calibration, run
+                    r"|BTATN? AT[A-Z0-9+=]{0,20}")  # Bluetooth module AT command (USB only; answers only while unpaired)
 PAGE = ROOT / "tools" / "probe_dashboard.html"
 # Competition calibration: 5 s of stationary readings per pose, appended one capture per line.
 CAPTURES = ROOT / ".local-data" / "calibration" / "pose-captures.jsonl"
@@ -193,6 +194,7 @@ class Link:
                 self.status = "not connected"
                 time.sleep(0.3)
                 continue
+            bluetooth = any(tag in port.upper() for tag in BLUETOOTH_TAGS)
             device = serial.Serial()
             device.port, device.baudrate, device.timeout = port, 115200, 0.1
             device.exclusive, device.dtr, device.rts = True, False, False
@@ -215,9 +217,14 @@ class Link:
                     if chunk:
                         last_rx = time.time()
                         self.status = "connected " + port
+                    elif time.time() - last_rx > 20 and bluetooth:
+                        # Never close a Bluetooth port on silence: after macOS closes its end, the
+                        # HC-06 (V2.3) stays "connected" to nobody until it loses power, ignoring
+                        # new links and AT commands (2 Nov). Keep the port and keep pinging.
+                        self.status = ("no data from %s for %d s: if it lasts, power-cycle the robot, "
+                                       "then pair DIVA again (PIN 1234)" % (port, time.time() - last_rx))
                     elif time.time() - last_rx > 20:
-                        # macOS can open a Bluetooth port without forming the link: retry.
-                        raise serial.SerialException("no data for 20 s (link not formed); reconnecting")
+                        raise serial.SerialException("no data for 20 s; reconnecting")
                     elif time.time() - last_rx > 3:
                         self.status = "port open, waiting for data " + port
                     buffer += chunk
