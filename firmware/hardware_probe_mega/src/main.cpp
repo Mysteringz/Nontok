@@ -25,6 +25,17 @@ static_assert(F_CPU==core::COLOR_CPU_HZ,"Probe sampling requires a 16 MHz Mega")
 static const uint8_t pwm[]={12,8,9,5};
 // M1..M4 direction pins, updated-shield profile (M4 on A4/A5), as in config.h.
 static const uint8_t motorIn1[]={34,37,43,A4},motorIn2[]={35,36,42,A5};
+// Wheel encoders (shield maker's MecanumRobotPS2Control.ino): channel A of M1..M4 on interrupt pins
+// 18, 19, 3, 2 (B on 31, 38, 49, A1: not read; A1 is a light sensor here). Rising edges of A only: the
+// direction is the commanded one, so a tick count measures how far a wheel turned.
+static const uint8_t encPin[4]={18,19,3,2};
+static volatile uint32_t encCount[4]={};
+static void enc0() { ++encCount[0]; }
+static void enc1() { ++encCount[1]; }
+static void enc2() { ++encCount[2]; }
+static void enc3() { ++encCount[3]; }
+static void encShow();   // ENC command; defined after the output stream
+static uint32_t encTotal() { noInterrupts();uint32_t s=encCount[0]+encCount[1]+encCount[2]+encCount[3];interrupts();return s; }
 static const uint8_t SPIN_PWM=90,DRIVE_PWM_MAX=200;
 static const uint16_t SPIN_MS=800,DRIVE_WATCHDOG_MS=400;
 static bool motorsLive=false;static int8_t spinning=-1;static uint32_t motorDeadline=0;
@@ -962,6 +973,7 @@ static void command(const char* line,bool usb) {
   else if(!strcmp(line,"PROBE")) scan();
   else if(!strcmp(line,"STATUS")) sample();
   else if(!strcmp(line,"GYROZERO")) gyroZero();
+  else if(!strcmp(line,"ENC")) encShow();
   else if(!strcmp(line,"GYROINIT")) { gyroBegin();scan(); }
   else if(!strcmp(line,"HEADING0")) {
     for(float& a:angle) a=0;
@@ -1096,6 +1108,12 @@ static void commands(Stream& in,LineReader& r,bool usb) {
     else { r.used=0;r.dropping=true;stopMotors();runStop=runActive; }
   }
 }
+static void encShow() {
+  uint32_t c[4];noInterrupts();for(uint8_t i=0;i<4;++i) c[i]=encCount[i];interrupts();
+  out.print(F("{\"type\":\"enc\",\"ticks\":["));
+  for(uint8_t i=0;i<4;++i) { if(i) out.print(',');out.print(c[i]); }
+  out.println(F("]}"));
+}
 void setup() {
   // Clear a watchdog reset flag first, or the next timeout could loop the bootloader.
   MCUSR=0;wdt_disable();
@@ -1106,6 +1124,9 @@ void setup() {
   for(uint8_t i=0;i<US_COUNT;++i) { digitalWrite(trig[i],LOW);pinMode(trig[i],OUTPUT);pinMode(echo[i],INPUT); }
   // A4 and every motor direction pin remain high impedance.
   for(uint8_t pin:light) pinMode(pin,INPUT);
+  for(uint8_t i=0;i<4;++i) pinMode(encPin[i],INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(encPin[0]),enc0,RISING);attachInterrupt(digitalPinToInterrupt(encPin[1]),enc1,RISING);
+  attachInterrupt(digitalPinToInterrupt(encPin[2]),enc2,RISING);attachInterrupt(digitalPinToInterrupt(encPin[3]),enc3,RISING);
   pinMode(32,INPUT);
   digitalWrite(colorS0,HIGH);digitalWrite(colorS1,LOW);
   pinMode(colorS0,OUTPUT);pinMode(colorS1,OUTPUT);pinMode(colorS2,OUTPUT);pinMode(colorS3,OUTPUT);
@@ -1288,6 +1309,21 @@ class MegaIo : public rl::Io {
     *deg=yawDeg();return true;
   }
   uint16_t lost() override { return overflows+gyroRestarts+gyroResets; }
+  uint32_t ticks() override { return encTotal(); }
+  // One continuous rotation stopped by the wheel encoders: until the four wheels have turned `want` more
+  // ticks in total (or ms), then the soft stop and settle; *got = ticks counted, coasting included.
+  bool turnTicks(int8_t dir,uint8_t p,uint32_t want,uint16_t ms,uint32_t* got) override {
+    uint32_t t0=encTotal();*got=0;
+    if(!startPulse(0,0,dir*100,p,100)) return false;
+    for(uint32_t s=millis();encTotal()-t0<want&&millis()-s<ms;) {
+      service();if(runStop) { stopMotors();return false; }
+      motorDeadline=millis()+300;
+    }
+    if(!softStop()) return false;
+    bool ok=wait(250);
+    *got=encTotal()-t0;
+    return ok;
+  }
   void event(const char* name,int16_t a,int16_t b,int16_t c,int16_t d) override {
     if(!strcmp_P(name,PSTR("step"))) runStepNow=uint8_t(a);
     else if(!strcmp_P(name,PSTR("colour"))) runTurnNow=int8_t(c);

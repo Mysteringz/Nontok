@@ -50,6 +50,8 @@ Runner::Runner(Io& io_, const Calib& cal_)
   stopTau = 0.15f;
   beamSlope[0] = beamSlope[1] = beamSlope[2] = 0;
   blocked = 0;
+  tpd = 0;
+  coast = 0;
   cornered = false;
   skewMode = 0;
   rN = 0;
@@ -363,9 +365,13 @@ bool Runner::rotateTo(float target, float tol, bool strict, float* reached) {
     float ms = rot[p].msFor(p ? fabsf(err) : 0.9f * fabsf(err));
     if (ms < rotMinMs[p]) ms = rotMinMs[p];
     uint16_t used;
+    uint32_t k0 = io.ticks();
     TRY(pulse(0, 0, err > 0 ? 100 : -100, rotPwm[p], ms, &used, 40, ROT_T_MAX));
     float a;
     if (!io.yaw(&a) || io.lost() != lost0) return fail(RL_F("gyro_lost_data_in_rotation"));
+    float deg = fabsf(a - y);
+    uint32_t dk = io.ticks() - k0;
+    if (deg >= 3 && dk > 0) tpd = tpd > 0 ? 0.7f * tpd + 0.3f * dk / deg : dk / deg;   // encoder ticks per degree
     io.event(RL_F("rotate"), err > 0 ? int16_t(used) : -int16_t(used), rotPwm[p], i16(y * 10), i16(a * 10));
     float turned = (a - y) * (err > 0 ? 1 : -1);   // in the intended direction
     if (turned < 0.3f) {   // static friction: longer next time, then more power
@@ -1240,9 +1246,27 @@ bool Runner::turnOnce(bool ccw) {
   if (!io.yaw(&y)) return fail(RL_F("gyro_not_valid_for_the_turn"));
   float want = fabsf(goal - y);
   uint16_t used;
-  // one smooth pulse for ~85 % of the turn (an over-estimated turn cannot overshoot), the gyro check finishes it
-  TRY(pulse(0, 0, ccw ? 100 : -100, rotPwm[0], rot[0].msFor(0.85f * want), &used, 40, ROT_T_MAX));
-  if (io.yaw(&a)) { float t = (a - y) * (ccw ? 1 : -1); rot[0].learn(used, t > 0 ? t : 0); }
+  if (tpd > 0) {
+    // Wheel encoders (user, 2 Nov): one rotation stopped by the wheel ticks for 95 % of the turn (ticks per
+    // degree learned from this run's gyro-checked turns, minus the ticks it coasts after a stop); the gyro
+    // check below finishes it.
+    float target = tpd * 0.95f * want - coast;
+    uint32_t got;
+    if (!io.turnTicks(ccw ? 1 : -1, rotPwm[0], uint32_t(target > 10 ? target : 10), 2200, &got)) return fail(RL_F("stopped"));
+    if (io.yaw(&a)) {
+      float t = (a - y) * (ccw ? 1 : -1);
+      io.event(RL_F("enc_turn"), i16(target), i16(got), i16(t * 10), i16(tpd * 10));
+      if (t > 20 && got > 0) {
+        coast = clampf(0.5f * coast + 0.5f * (got - (target > 10 ? target : 10)), 0, 2000);
+        tpd = 0.5f * tpd + 0.5f * got / t;
+      }
+    }
+  } else {
+    // no encoder data (none counted on this run's turns): one smooth timed pulse for ~85 % of the turn
+    io.event(RL_F("enc_unknown"));
+    TRY(pulse(0, 0, ccw ? 100 : -100, rotPwm[0], rot[0].msFor(0.85f * want), &used, 40, ROT_T_MAX));
+    if (io.yaw(&a)) { float t = (a - y) * (ccw ? 1 : -1); rot[0].learn(used, t > 0 ? t : 0); }
+  }
   // check the turn on the gyro and correct it (slow fine turns) until within 0.8 deg
   if (io.yaw(&a) && fabsf(goal - a) > ROT_TOL) TRY(rotateTo(goal, ROT_TOL, true, &a));
   io.event(RL_F("turned"), ccw, i16((a - start) * 10));

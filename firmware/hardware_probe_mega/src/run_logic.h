@@ -126,6 +126,13 @@ class Io {
   virtual bool driveEnd() = 0;
   // Progress report: name (RL_F string) and up to four integers.
   virtual void event(const char* name, int16_t a = 0, int16_t b = 0, int16_t c = 0, int16_t d = 0) = 0;
+  // Wheel encoder ticks so far, all four wheels summed (0 and never changing: none fitted).
+  virtual uint32_t ticks() { return 0; }
+  // One continuous rotation (dir +1 CCW) at pwm, stopped once the wheels have turned `want` more ticks in
+  // total (or after ms), soft stop and settle; *got = ticks counted including the coast. false = stopped.
+  virtual bool turnTicks(int8_t dir, uint8_t pwm, uint32_t want, uint16_t ms, uint32_t* got) {
+    (void)dir; (void)pwm; (void)want; (void)ms; *got = 0; return true;
+  }
   virtual ~Io() {}
 };
 
@@ -205,6 +212,7 @@ class Runner {
   bool snapped;        // driveForward saw both side walls at that spacing: snap holds front / sides then
   int16_t snap[NUS];
   float beamSlope[3];
+  float tpd, coast;     // encoder ticks per degree of rotation, ticks coasted after the stop (learned; tpd 0 = unknown)
   // 2 cm rule (user, 2 Nov): a sensor reading <= BLOCK_MM bars every move toward it (front: forward;
   // a 45 deg beam: forward and sideways to its side; a side: sideways to it) until it reads > 2 x.
   uint8_t blocked;     // bit per sensor

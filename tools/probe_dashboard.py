@@ -23,7 +23,7 @@ from serial.tools import list_ports
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMANDS = {"STATUS", "PROBE", "GYROINIT", "GYROZERO", "HEADING0", "STOP", "HELP", "NOGYRO", "QUIETGYRO",
-            "CALSAVE", "CALSHOW", "RUN", "AUTORUN ON", "AUTORUN OFF"}
+            "CALSAVE", "CALSHOW", "RUN", "AUTORUN ON", "AUTORUN OFF", "ENC"}
 # Motion: one-motor identify spin, raw watchdogged drive (firmware caps |v| at 200)
 # and the on-board 180-degree turn test.
 MOTION = re.compile(r"SPIN [1-4] [+-]|(MOT|TURNTEST)( -?\d{1,3}){4}"
