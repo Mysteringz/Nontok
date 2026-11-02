@@ -103,6 +103,35 @@ class Sim : public rl::Io {
     if (hypot(p.x, p.y - WALL_Y) > WALL_Y + 400 || p.y > WALL_Y - 100) outOfSector = true;
     return pulses < 600;
   }
+  // Continuous drive: 25 ms steps; speed 0.6 mm/ms * (pwm-45)/40 (stalls below 45), a forward drive turns the
+  // robot slowly CW, one front ping per step (4 mm noise, 5 % no echo, 3 % spurious far echo), 5 mm of coast.
+  double drvX = 0, drvY = 0, drvW = 0;
+  int drvPwm = 0;
+  double speed() const { return drvPwm < 45 ? 0 : 0.6 * (drvPwm - 45) / 40; }
+  bool driveStart(int8_t x, int8_t y, int8_t w, uint8_t pwm) override { ++pulses; return driveSet(x, y, w, pwm); }
+  bool driveSet(int8_t x, int8_t y, int8_t w, uint8_t pwm) override { drvX = x / 100.0; drvY = y / 100.0; drvW = w / 100.0; drvPwm = pwm; return true; }
+  bool drivePoll(int16_t* front, float* dt) override {
+    const double ms = 25, v = speed() * (1 + 0.05 * gauss());
+    p.x += -(drvX * v * ms) * sin(p.psi) - (drvY * 0.5 * v * ms) * cos(p.psi);
+    p.y += (drvX * v * ms) * cos(p.psi) - (drvY * 0.5 * v * ms) * sin(p.psi);
+    p.psi += ((drvW * 0.25 - 0.004 * drvX) * ms) * PI / 180;
+    if (hypot(p.x, p.y - WALL_Y) > WALL_Y + 400 || p.y > WALL_Y - 100) outOfSector = true;
+    double r[5];
+    sense(p, r, true);
+    double f = r[2];
+    if (f > 0 && urand() < 0.03) f = 100 + 400 * urand();   // spurious echo
+    *front = f > 0 ? int16_t(f + 0.5) : -1;
+    *dt = float(ms / 1000);
+    return pulses < 600;
+  }
+  bool driveEnd() override {
+    const double coast = speed() * 1000 * 0.02;   // mm
+    p.x += -(drvX * coast) * sin(p.psi);
+    p.y += (drvX * coast) * cos(p.psi);
+    drvPwm = 0;
+    if (p.y > WALL_Y - 100) outOfSector = true;
+    return true;
+  }
   bool yaw(float* deg) override { *deg = float(p.psi * 180 / PI + yawBias); return true; }
   uint16_t lost() override { return 0; }
   void event(const char* name, int16_t a, int16_t b, int16_t c, int16_t d) override {

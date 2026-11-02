@@ -738,9 +738,8 @@ static void btAt(const char* text,bool crlf) {
 }
 // One timed mecanum move: x forward, y left, w CCW, each -100..100, mixed like the step controller
 // and scaled so the busiest wheel gets pwm; stops by itself after ms (pulse_done). Needs a wheel map.
-static bool startPulse(int16_t x,int16_t y,int16_t w,int16_t p,int16_t ms) {
-  stopMotors();
-  if(abs(x)>100||abs(y)>100||abs(w)>100||p<30||p>int16_t(DRIVE_PWM_MAX)||ms<10||ms>1500) {
+static bool applyMix(int16_t x,int16_t y,int16_t w,int16_t p) {
+  if(abs(x)>100||abs(y)>100||abs(w)>100||p<30||p>int16_t(DRIVE_PWM_MAX)) {
     out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return false;
   }
   if(wheelMotor[0]<0) { out.println(F("{\"error\":\"PULSE_NEEDS_WMAP\"}"));return false; }
@@ -750,6 +749,12 @@ static bool startPulse(int16_t x,int16_t y,int16_t w,int16_t p,int16_t ms) {
   int16_t raw[4]={};
   for(uint8_t q=0;q<4;++q) raw[wheelMotor[q]]=wheelSign[q]*int16_t(p*wheel[q]/peak);
   for(uint8_t m=0;m<4;++m) setMotor(m,raw[m]);
+  return true;
+}
+static bool startPulse(int16_t x,int16_t y,int16_t w,int16_t p,int16_t ms) {
+  stopMotors();
+  if(ms<10||ms>1500) { out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return false; }
+  if(!applyMix(x,y,w,p)) return false;
   motorsLive=true;pulsing=true;motorDeadline=millis()+ms;
   out.print(F("{\"type\":\"pulse_start\",\"ms\":"));out.print(millis());out.println('}');
   return true;
@@ -1161,6 +1166,24 @@ class MegaIo : public rl::Io {
     }
     return wait(350);   // settle before measuring
   }
+  // Continuous forward drive (Runner::driveForward): no sample() while driving (it blocks ~180 ms, blind at
+  // 20 cm/s), only the commands/watchdog and a ping of the front sensor every >= 25 ms.
+  uint32_t lastPollMs=0;
+  bool driveStart(int8_t x,int8_t y,int8_t w,uint8_t pwm) override {
+    if(!startPulse(x,y,w,pwm,1500)) return false;
+    lastPollMs=millis();return !runStop;
+  }
+  bool driveSet(int8_t x,int8_t y,int8_t w,uint8_t pwm) override { return applyMix(x,y,w,pwm); }
+  bool drivePoll(int16_t* front,float* dt) override {
+    while(millis()-lastPollMs<25) { service();if(runStop) { stopMotors();return false; } }
+    service();
+    int16_t f=range(2);   // front
+    uint32_t now=millis();*dt=(now-lastPollMs)/1000.0f;lastPollMs=now;
+    *front=f;
+    if(runStop) { stopMotors();return false; }
+    return motorsLive;   // false: the 1.5 s motor deadline passed (the run caps a drive at 0.8 s)
+  }
+  bool driveEnd() override { stopMotors();return wait(350); }
   bool yaw(float* deg) override {
     if(!gyroRunning||!biasValid) return false;
     *deg=yawDeg();return true;

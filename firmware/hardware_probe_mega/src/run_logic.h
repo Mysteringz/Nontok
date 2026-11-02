@@ -3,6 +3,7 @@
 // Pure logic: all I/O goes through rl::Io, so the same code runs on the Mega (main.cpp) and on a
 // host against a simulated arena (tests/run_logic_test.cpp).
 #pragma once
+#include <math.h>
 #include <stdint.h>
 #ifdef __AVR__
 #include <avr/pgmspace.h>
@@ -24,6 +25,41 @@ struct Calib {
   uint16_t greenMilli, redMilli;
 };
 
+// Front-distance tracker for forward moves: constant-velocity Kalman filter, state (distance mm,
+// speed mm/s; negative = approaching). predict() every poll, update() with each echo. An echo far
+// from the prediction (a spurious reflection) is rejected by the innovation gate; a missing echo
+// just means prediction continues. See Runner::driveForward.
+class Kalman1D {
+ public:
+  void init(float d0, float sigmaZ = 6.0f) {
+    d = d0; v = 0; r = sigmaZ * sigmaZ;
+    p00 = r; p01 = 0; p11 = 150.0f * 150.0f;
+  }
+  void predict(float dt, float accel = 500.0f) {   // accel: mm/s^2 the speed may change by (1 sigma)
+    float q = accel * accel;
+    d += v * dt;
+    p00 += dt * (2 * p01 + dt * p11) + q * dt * dt * dt * dt / 4;
+    p01 += dt * p11 + q * dt * dt * dt / 2;
+    p11 += q * dt * dt;
+  }
+  // false = rejected (outside max(30 mm, 3.5 sigma) of the prediction)
+  bool update(float z) {
+    float s = p00 + r, y = z - d, gate = 3.5f * sqrtf(s);
+    if (gate < 30.0f) gate = 30.0f;
+    if (y > gate || y < -gate) return false;
+    float k0 = p00 / s, k1 = p01 / s;
+    d += k0 * y;
+    v += k1 * y;
+    float n00 = (1 - k0) * p00, n01 = (1 - k0) * p01, n11 = p11 - k1 * p01;
+    p00 = n00; p01 = n01; p11 = n11;
+    return true;
+  }
+  float dist() const { return d; }
+  float speed() const { return v; }
+ private:
+  float d, v, r, p00, p01, p11;
+};
+
 class Io {
  public:
   // Fresh readings once the robot is still: per sensor the median of 3 scans, -1 if fewer than
@@ -36,6 +72,15 @@ class Io {
   virtual bool yaw(float* deg) = 0;
   // Gyro data losses so far (overflows, restarts, resets): a change means the angle jumped.
   virtual uint16_t lost() = 0;
+  // Continuous forward motion (Runner::driveForward): driveStart turns the motors on, drivePoll waits
+  // until >= 25 ms after the previous poll, services the robot (STOP, watchdog) and pings only the
+  // front sensor (*front = mm or -1; *dt = seconds since the previous poll, or since driveStart);
+  // driveSet changes the speed without stopping; driveEnd stops, lets the robot settle and returns.
+  // false from any of them = stopped (STOP / button): the run ends.
+  virtual bool driveStart(int8_t x, int8_t y, int8_t w, uint8_t pwm) = 0;
+  virtual bool driveSet(int8_t x, int8_t y, int8_t w, uint8_t pwm) = 0;
+  virtual bool drivePoll(int16_t* front, float* dt) = 0;
+  virtual bool driveEnd() = 0;
   // Progress report: name (RL_F string) and up to four integers.
   virtual void event(const char* name, int16_t a = 0, int16_t b = 0, int16_t c = 0, int16_t d = 0) = 0;
   virtual ~Io() {}
@@ -68,6 +113,8 @@ class Runner {
   bool pulse(int8_t x, int8_t y, int8_t w, uint8_t pwm, float ms, uint16_t* used = 0);
   bool errors(Pose pose, const int16_t us[NUS], bool creep, float* ex, bool* hasEx, float* ey, bool* hasEy);
   bool translate(uint8_t axis, float err, int16_t us[NUS], float maxMs = 300, uint16_t* used = 0);
+  float stopTau;       // seconds the robot keeps moving after the stop decision (learned from each drive)
+  bool driveForward(float stopAt, float maxMs, uint8_t pwmFast, uint8_t pwmSlow, int16_t us[NUS]);
   bool learn(uint8_t axis, bool hasBefore, float before, bool hasAfter, float after, uint16_t ms);
   bool hold(int16_t us[NUS]);
   bool rotateTo(float target, float tol, bool strict, float* reached = 0);

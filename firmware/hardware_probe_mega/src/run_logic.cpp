@@ -24,6 +24,7 @@ Runner::Runner(Io& io_, const Calib& cal_)
   k[1] = 0.25f;
   memset(wcomp, 0, sizeof(wcomp));
   rate[0] = rate[1] = 0;
+  stopTau = 0.05f;
 }
 
 bool Runner::measure(int16_t us[NUS], float* rg) {
@@ -81,6 +82,14 @@ bool Runner::errors(Pose pose, const int16_t us[NUS], bool creep, float* ex, boo
 // One move along x (axis 0) or y (axis 1), then fresh readings. A move also turns this robot
 // (strafes CCW, forward CW): each axis and sign learns how much opposite rotation to mix in.
 bool Runner::translate(uint8_t axis, float err, int16_t us[NUS], float maxMs, uint16_t* used) {
+  if (axis == 0 && err > 0 && us[FRONT] > 0) {
+    // Forward: continuous Kalman-tracked drive (see driveForward), never a fixed-length jerk. The
+    // stop target is 90 % of the way, as before the next measurement closes the rest.
+    float stopAt = us[FRONT] - 0.9f * err;
+    if (stopAt < 20) stopAt = 20;
+    if (used) *used = 0;
+    return driveForward(stopAt, 800, 75, 60, us);
+  }
   float ms = DEAD_MS + FRACTION * fabsf(err) / k[axis];
   if (ms > maxMs) ms = maxMs;
   if (axis == 1 && ms > 200) ms = 200;   // a 300 ms strafe also rotated the robot
@@ -97,8 +106,70 @@ bool Runner::translate(uint8_t axis, float err, int16_t us[NUS], float maxMs, ui
   return true;
 }
 
+// Continuous forward drive toward a front-distance target, with no fixed move length: the front sensor
+// is pinged every ~25 ms and tracked by a Kalman filter (distance, closing speed; echoes far from
+// the prediction are rejected). The robot stops once the predicted wall distance after the stop
+// (distance + speed * stopTau, tau learned from where each drive really stopped) reaches `stopAt`, so a
+// coarse move cannot overshoot and the last stretch runs at constant slow speed (pwmSlow, within 70 mm).
+// It stops for good after maxMs (<= 800: the gyro FIFO holds ~0.85 s), on 8 polls without an echo,
+// or when the robot does not move (the speed is raised in steps of 8 PWM up to 100).
+bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwmFast, uint8_t pwmSlow, int16_t us[NUS]) {
+  if (us[FRONT] <= 0) return fail(RL_F("drive_needs_front_echo"));
+  if (maxMs > 800) maxMs = 800;
+  Kalman1D kf;
+  kf.init(float(us[FRONT]));
+  float d0 = float(us[FRONT]), t = 0;
+  int8_t w = wcomp[0][1];
+  uint8_t pwm = d0 - stopAt > 70 ? pwmFast : pwmSlow;
+  float before = 0, after;
+  bool hasBefore = io.yaw(&before);
+  if (!io.driveStart(100, 0, w, pwm)) return fail(RL_F("stopped"));
+  uint8_t blind = 0;
+  float dDecision = d0, vDecision = 0;
+  bool slow = pwm == pwmSlow, ok = true;
+  for (;;) {
+    int16_t z;
+    float dt;
+    if (!io.drivePoll(&z, &dt)) { io.driveEnd(); return fail(RL_F("stopped")); }
+    t += dt * 1000;
+    kf.predict(dt);
+    if (z > 0) {
+      if (kf.update(z)) blind = 0;
+      else ++blind;   // rejected as spurious: counts like a missing echo
+    } else ++blind;
+    float d = kf.dist(), v = kf.speed();
+    if (!slow && d - stopAt < 70) { slow = true; pwm = pwmSlow; ok = io.driveSet(100, 0, w, pwm); }
+    if (!ok) { io.driveEnd(); return fail(RL_F("stopped")); }
+    if (t > 250 && d0 - d < 5 && pwm < 100) {   // not moving: static friction
+      pwm = pwm + 8 > 100 ? 100 : pwm + 8;
+      if (pwmSlow < pwm) pwmSlow = pwm;
+      if (!io.driveSet(100, 0, w, pwm)) { io.driveEnd(); return fail(RL_F("stopped")); }
+      d0 = d + 5;   // restart the progress check
+      t = 0;
+    }
+    dDecision = d;
+    vDecision = v;
+    if (d + v * stopTau <= stopAt + 3) break;   // predicted distance after stopping
+    if (t >= maxMs || blind >= 8) break;
+  }
+  if (!io.driveEnd()) return fail(RL_F("stopped"));
+  int16_t after_us[NUS];
+  TRY(measure(after_us));
+  // Learn the stopping time: it moved (decision distance - final reading) after the decision at speed |v|.
+  if (after_us[FRONT] > 0 && t < maxMs && blind < 8 && fabsf(vDecision) > 60) {
+    float tauObs = (dDecision - after_us[FRONT]) / fabsf(vDecision);
+    stopTau = clampf(0.5f * stopTau + 0.5f * tauObs, 0.005f, 0.2f);
+  }
+  io.event(RL_F("drive"), i16(us[FRONT]), after_us[FRONT], i16(stopAt), i16(stopTau * 1000));
+  if (hasBefore && io.yaw(&after)) {   // forward drives turn this robot: learn the compensation
+    wcomp[0][1] = int8_t(clampf(roundf(wcomp[0][1] - 1.5f * (after - before) / (t > 600 ? 2.0f : 1.0f)), -40, 40));
+  }
+  memcpy(us, after_us, sizeof(after_us));
+  return true;
+}
+
 bool Runner::learn(uint8_t axis, bool hasBefore, float before, bool hasAfter, float after, uint16_t ms) {
-  if (!hasBefore || !hasAfter) return true;
+  if (!hasBefore || !hasAfter || ms == 0) return true;   // ms == 0: a Kalman-tracked drive, not a timed pulse
   float moved = before * after > 0 ? fabsf(before) - fabsf(after) : fabsf(before) + fabsf(after);
   if (moved < -25) {
     if (axis == 0) return fail(RL_F("forward_move_went_the_wrong_way"));
@@ -286,7 +357,12 @@ bool Runner::seek(Pose pose, bool creep, float tol, int16_t us[NUS]) {
       TRY(learn(0, true, ex, hasEx2, ex2, used));
       TRY(hold(us2));
     } else if (sideRef) {
-      if (lostSide++ >= 2) return fail(RL_F("side_walls_not_where_the_capture_saw_them"));
+      if (lostSide++ >= 2) {
+        // The side wall is out of sight (heading off the wall's normal, 2 Nov): go on with the front
+        // sensor alone rather than abort the whole run.
+        io.event(RL_F("side_unseen_continue"), pose, move);
+        return true;
+      }
       TRY(measure(us));
       continue;
     } else {
@@ -503,15 +579,18 @@ bool Runner::turnTo(bool ccw) {
   return true;
 }
 
-// Final approach: creep straight forward to the box's front reading (half the remaining
-// distance per move, none once within 15 mm), strafe only if the back-wall side drifts > 30 mm,
-// hold the heading, then square on the box's 45 deg beam.
+// Final approach, no rotation near the wall: coarse Kalman-tracked drive to 150 mm short of the box's front
+// reading, hold the heading and square on the box's 45 deg beam from there (>= 15 cm from the wall,
+// so turning cannot touch it), then a constant slow creep to the front reading (driveForward stops
+// by predicted distance). Backs off if already closer than 12 mm to the target; never drives without
+// a front echo. 2 Nov: fixed-length moves went 161 -> 55 -> 29 mm and touched the wall.
 bool Runner::park(Pose pose, int16_t us[NUS]) {
   const int16_t* ref = cal.ref[pose];
   int8_t side = ref[RSIDE] != NONE ? RSIDE : ref[LSIDE] != NONE ? LSIDE : -1;
   TRY(measure(us));
   int16_t prev = -1;
   bool squared = false;
+  uint8_t blind = 0;
   for (uint8_t move = 0; move < 40; ++move) {
     int16_t front = us[FRONT];
     bool hasEy = false;
@@ -522,28 +601,54 @@ bool Runner::park(Pose pose, int16_t us[NUS]) {
     }
     io.event(RL_F("park"), move, front, hasEy ? i16(ey) : NONE);
     if (front <= 0 || (prev > 0 && fabsf(float(front - prev)) > 150)) {   // lost or implausible
+      if (++blind > 4) return fail(RL_F("park_front_echo_lost"));
       prev = -1;
+      if (blind == 3) {   // no echo twice in a row: the wall reflects the beam away (heading > ~10 deg off): re-find it
+        io.event(RL_F("park_refind_wall"), move);
+        TRY(squareHere());
+      }
       TRY(measure(us));
       continue;
     }
+    blind = 0;
     prev = front;
-    if (hasEy && fabsf(ey) > 30) {
+    float toGo = front - ref[FRONT];
+    if (toGo < -12) {   // too close: back straight off
+      TRY(translate(0, toGo, us));
+      continue;
+    }
+    // Sideways only while >= 10 cm from the wall (a strafe also turns the robot); tighter once squared.
+    if (hasEy && fabsf(ey) > (squared ? 15.0f : 30.0f) && toGo > 100) {
       TRY(translate(1, ey, us));
-    } else if (front > ref[FRONT] + 15) {   // the shortest forward move still travels ~20 mm
-      TRY(translate(0, (front - ref[FRONT]) / FRACTION * 0.5f, us, 200));
-    } else {
-      float y;
-      bool hy = io.yaw(&y);
-      if (hy && goalSet && fabsf(goal - y) > HOLD_TOL) { TRY(hold(us)); continue; }
-      if (!squared) {
-        squared = true;
+      TRY(hold(us));
+      continue;
+    }
+    if (toGo > 180) {
+      TRY(driveForward(ref[FRONT] + 150, 800, 75, 75, us));
+      TRY(hold(us));
+      continue;
+    }
+    if (!squared) {
+      squared = true;
+      if (toGo >= 60) {
+        TRY(hold(us));
         TRY(squareToBeams(pose, us));
         continue;
       }
-      io.event(RL_F("parked"), front, ref[FRONT], hy && goalSet ? i16((y - goal) * 10) : NONE);
-      return true;
     }
-    TRY(hold(us));
+    if (toGo > 80) {   // creep to 6 cm short, then re-check the heading while there is still room to turn
+      TRY(driveForward(ref[FRONT] + 60, 800, 60, 60, us));
+      TRY(hold(us));
+      continue;
+    }
+    if (toGo > 8) {   // the last stretch: straight, no rotation this close to the wall
+      TRY(driveForward(ref[FRONT], 800, 60, 60, us));
+      continue;
+    }
+    float y;
+    bool hy = io.yaw(&y);
+    io.event(RL_F("parked"), front, ref[FRONT], hy && goalSet ? i16((y - goal) * 10) : NONE);
+    return true;
   }
   return fail(RL_F("park_not_finished"));
 }
