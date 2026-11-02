@@ -1459,7 +1459,12 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[
   ey = eyP = ey0;
   float t = 0, tWin = 0, nWin = fabsf(ex0) + fabsf(ey0), rx = 0, ry = 0;
   int8_t mx = 0, my = 0, mw = 0;
-  uint8_t pwm = 0, boost = 0, end = 0;   // end: 0 reached, 1 time, 2 wall lost, 3 corner
+  uint8_t pwm = 0, boost = 0, end = 0;   // end: 0 reached, 1 time, 2 wall lost, 3 corner, 4 travelled too far
+  // A move never runs much past its error (2 Nov at N: a 16 mm correction drove 120 mm when the front's
+  // two echoes made the filter reject it): time scaled to the error, and the raw front's travel capped.
+  const float big = fabsf(ex0) > fabsf(ey0) / STRAFE_EFF ? fabsf(ex0) : fabsf(ey0) / STRAFE_EFF;
+  const float capMs = clampf(500 + 10 * big, 600, MOVE_MAX_MS);
+  const int16_t f0 = us[FRONT];
   bool moving = false;
   for (uint16_t polls = 0;; ++polls) {
     float cx = doneX ? 0 : ex, cy = doneY ? 0 : ey / STRAFE_EFF;
@@ -1520,7 +1525,8 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[
       end = 3;
       break;
     }
-    if (t >= MOVE_MAX_MS) { end = 1; break; }
+    if (t >= capMs) { end = 1; break; }
+    if (f0 > 0 && z[FRONT] > 0 && fabsf(float(f0 - z[FRONT])) > fabsf(ex0) + 50) { end = 4; break; }
     if (t - tWin >= 400) {   // no progress at all over 400 ms: a little more power
       if (nWin - (fabsf(ex) + fabsf(ey)) < 3 && boost < 30) boost += 4;
       tWin = t;
@@ -1567,7 +1573,7 @@ bool Runner::align(Pose pose, uint8_t set, float target, float deadX, float dead
     // In position (front and side within 12 mm): the 45 deg beams against the capture give the heading
     // left over, with the slope learned from the straighten turns (at most 2 such turns, 5 deg each).
     float bv, br;
-    if (beamFixes < 2 && hx && hy && fabsf(ex) <= 12 && fabsf(ey) <= 12 && beamSlope[set] != 0 &&
+    if (beamFixes < 2 && hx && hy && fabsf(ex) <= 12 && fabsf(ey) <= 12 && fabsf(beamSlope[set]) >= 8 &&   // 2 Nov: -3 mm/deg gave a wrong 5 deg
         beam(cal.ref[pose], set, us, &bv, &br) && fabsf(bv - br) > 6) {
       float dth = clampf(-(bv - br) / beamSlope[set], -5, 5);
       if (fabsf(dth) > 1.5f) {
@@ -1588,6 +1594,53 @@ bool Runner::align(Pose pose, uint8_t set, float target, float deadX, float dead
     if (cornered && recoveries < 2) { ++recoveries; TRY(recover(set, us)); continue; }
     TRY(hold(us));
   }
+}
+
+// How well the turned stage's three sensors match a capture: rms mm over front, the side on the main wall
+// and the 45 deg beam on that side (each capped at 150, no echo = 150).
+static float fitErr(const int16_t* ref, uint8_t set, const int16_t* us) {
+  const uint8_t ks[3] = {FRONT, uint8_t(set == SET_RIGHT_TURN ? LSIDE : RSIDE), uint8_t(set == SET_RIGHT_TURN ? L45 : R45)};
+  float sum = 0;
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < 3; ++i) {
+    uint8_t k = ks[i];
+    if (ref[k] == NONE) continue;
+    float e = us[k] > 0 ? fabsf(float(us[k] - ref[k])) : 150;
+    if (e > 150) e = 150;
+    sum += e * e;
+    ++n;
+  }
+  return n ? sqrtf(sum / n) : 0;
+}
+
+// After the gyro's 90 deg: the heading that best fits the turned capture on its three sensors (user,
+// 2 Nov: the gyro turn alone overshot on the field). From the gyro's heading, 3 deg steps one way while
+// the fit improves by > 3 mm (at most 3 steps), else the other way; the best heading becomes the goal.
+bool Runner::fitHeading(Pose pose, uint8_t set, int16_t us[NUS]) {
+  const int16_t* ref = cal.ref[pose];
+  TRY(measure(us));
+  float y0, y;
+  if (!io.yaw(&y0)) return true;
+  float best = fitErr(ref, set, us), bestYaw = y0;
+  io.event(RL_F("fit_heading"), 0, i16(best), 0);
+  for (int8_t dir = 1; dir >= -1; dir -= 2) {
+    bool improved = false;
+    for (uint8_t step = 1; step <= 3; ++step) {
+      TRY(rotateTo(bestYaw + 3 * dir, ROT_TOL, false));
+      TRY(measure(us));
+      if (!io.yaw(&y)) break;
+      float e = fitErr(ref, set, us);
+      io.event(RL_F("fit_heading"), dir * step, i16(e), i16((y - y0) * 10));
+      if (e < best - 3) { best = e; bestYaw = y; improved = true; }
+      else break;
+    }
+    if (improved) break;
+    TRY(rotateTo(bestYaw, ROT_TOL, false));   // back to the best before trying the other way
+  }
+  setGoal(bestYaw);
+  TRY(rotateTo(goal, ROT_TOL, false));
+  io.event(RL_F("fit_heading_done"), i16(best), i16((goal - y0) * 10));
+  return measure(us);
 }
 
 // Into the box (2 Nov field: sideways moves at the wall each turned the robot 3-7 deg, the heading fix
@@ -1703,7 +1756,12 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     float conf = clampf(fabsf(logf(rg / split)) / (logf(r / g) / 2), 0, 1);
     turnDir = rg > split ? -1 : 1;   // red turns right, green turns left
     io.event(RL_F("colour"), i16(rg * 1000), i16(conf * 100), turnDir);
-    TRY(turnOnce(turnDir > 0));                                        // 4
+    TRY(turnOnce(turnDir > 0));                                        // 4: gyro 90 deg
+    Pose turned = turnDir > 0 ? N_LEFT : N_RIGHT;                      // 5: fit the turned capture on its 3 sensors
+    uint8_t set = turnDir > 0 ? SET_LEFT_TURN : SET_RIGHT_TURN;        //    (front, side and 45 deg on the main wall)
+    TRY(align(turned, set, 95, 10, 10, 4, us));                        //    position
+    TRY(fitHeading(turned, set, us));                                  //    heading
+    TRY(align(turned, set, 95, 10, 10, 4, us));                        //    position again
   }
   if (first <= 4 && last >= 4) {
     io.event(RL_F("step"), 4);
@@ -1719,7 +1777,8 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     TRY(walkTo(cal.ref[box][FRONT] + 180, us));                       // 5: straight, slowly, to 180 mm short
     skewMode = 0;
     if (cornered) TRY(recover(set, us));                               //    stopped at a wall: back off, re-localize
-    else TRY(straighten(set, a, us));                                  //    heading from the main wall
+    else TRY(straighten(set, a, us, 0, 8));                            //    heading from the main wall (<= 8 deg: 2 Nov a
+                                                                       //    28 deg misfit drove the robot off the field)
     TRY(parkIn(box, set, us));                                         // 6: sideways in the open, straight in, small fixes
     TRY(measure(us));
     float yy;
