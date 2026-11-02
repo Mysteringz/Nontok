@@ -32,6 +32,14 @@ static bool pulsing=false;   // A timed PULSE move is running; its end is report
 // loop(); STOP, '!' or a malformed line set runStop and the run ends at its next wait.
 static bool runRequested=false,runActive=false,runStop=false;
 static uint8_t runFirst=1,runLast=4;static int8_t runForceTurn=0;
+// Start by the reset button (or power switch): with AUTORUN ON stored, every start except a
+// watchdog reset counts down 10 s (LED D13 blinking, faster for the last 3 s), then runs.
+// Any byte on USB (bench work: plugging USB in also resets the board) or a STOP cancels it;
+// Bluetooth does not, so a computer can connect and watch the run.
+static const int AUTORUN_ADDRESS=3964;static const uint8_t AUTORUN_MAGIC=0xA5;
+static const uint16_t AUTORUN_MS=10000;static const uint8_t AUTORUN_LED=13;
+static uint32_t autorunAt=0;static bool autorunPending=false;
+static void autorunCancel(const __FlashStringHelper* why);
 // Soft start: outputs step toward their targets by RAMP_STEP every RAMP_MS (0->100 in
 // ~125 ms), limiting the inrush that reset the board with four motors starting at once.
 // Stopping is never ramped.
@@ -849,6 +857,13 @@ static void command(const char* line,bool usb) {
     return;
   }
   if(calCommand(line)) return;
+  if(!strcmp(line,"AUTORUN ON")||!strcmp(line,"AUTORUN OFF")) {
+    bool on=line[9]=='N';
+    if(on&&!calValid) { out.println(F("{\"error\":\"AUTORUN_NEEDS_CALSAVE\"}"));return; }
+    EEPROM.update(AUTORUN_ADDRESS,on?AUTORUN_MAGIC:0);
+    out.print(F("{\"type\":\"autorun\",\"armed\":"));out.print(on);out.println('}');
+    return;
+  }
   if(!strcmp(line,"RUN")||!strncmp(line,"RUN ",4)) {
     int16_t v[3]={1,4,0};
     if(line[3]&&!parseInts(line+4,v,2)&&!parseInts(line+4,v,3)) { out.println(F("{\"error\":\"BAD_RUN\"}"));return; }
@@ -874,7 +889,7 @@ static void command(const char* line,bool usb) {
     motorsLive=true;motorDeadline=millis()+DRIVE_WATCHDOG_MS;
     return;
   }
-  if(!strcmp(line,"STOP")) { stopMotors();runStop=runActive;out.println(F("{\"type\":\"stop\",\"motors\":\"PWM_LOW\"}")); }
+  if(!strcmp(line,"STOP")) { stopMotors();runStop=runActive;autorunCancel(F("stop"));out.println(F("{\"type\":\"stop\",\"motors\":\"PWM_LOW\"}")); }
   else if(!strcmp(line,"PROBE")) scan();
   else if(!strcmp(line,"STATUS")) sample();
   else if(!strcmp(line,"GYROZERO")) gyroZero();
@@ -887,7 +902,13 @@ static void command(const char* line,bool usb) {
   else if(!strcmp(line,"HELP")) out.println(F("{\"commands\":[\"STOP\",\"PROBE\",\"STATUS\",\"GYROINIT\",\"GYROZERO\",\"HEADING0\",\"PING\",\"SPIN m +|-\",\"MOT a b c d\",\"HELP\"],\"motion\":\"SPIN/MOT, watchdogged\"}"));
   else out.println(F("{\"error\":\"UNKNOWN_COMMAND_NO_MOTION\"}"));
 }
+static void autorunCancel(const __FlashStringHelper* why) {
+  if(!autorunPending) return;
+  autorunPending=false;digitalWrite(AUTORUN_LED,LOW);
+  out.print(F("{\"type\":\"autorun_cancelled\",\"by\":\""));out.print(why);out.println(F("\"}"));
+}
 static void commands(Stream& in,LineReader& r,bool usb) {
+  if(usb&&in.available()) autorunCancel(F("usb"));
   while(in.available()) {
     char c=in.read();
     if(c=='!') { stopMotors();runStop=runActive;r.used=0;r.dropping=true;continue; }
@@ -925,6 +946,13 @@ void setup() {
   gyroBegin();
   scan();
   calLoad();calShow();
+  pinMode(AUTORUN_LED,OUTPUT);digitalWrite(AUTORUN_LED,LOW);
+  bool armed=EEPROM.read(AUTORUN_ADDRESS)==AUTORUN_MAGIC;
+  out.print(F("{\"type\":\"autorun\",\"armed\":"));out.print(armed);
+  if(armed&&lastResetWatchdog) out.print(F(",\"skipped\":\"watchdog_reset\""));
+  else if(armed&&!calValid) out.print(F(",\"skipped\":\"no_calibration\""));
+  else if(armed) { autorunPending=true;autorunAt=millis()+AUTORUN_MS;out.print(F(",\"countdown_ms\":"));out.print(AUTORUN_MS); }
+  out.println('}');
 }
 static void service() {
   commands(Serial,usbReader,true);
@@ -1008,7 +1036,14 @@ static void runTournament() {
   out.print(F("\",\"turn\":"));out.print(runner.turn());out.print(F(",\"ms\":"));out.print(millis());out.println('}');
 }
 void loop() {
-  if(runRequested) runTournament();
+  if(autorunPending) {
+    int32_t left=int32_t(autorunAt-millis());
+    if(left<=0) {
+      autorunPending=false;digitalWrite(AUTORUN_LED,HIGH);   // LED on while the run lasts
+      runFirst=1;runLast=4;runForceTurn=0;runRequested=true;
+    } else digitalWrite(AUTORUN_LED,(millis()/(left<3000?125:500))&1);
+  }
+  if(runRequested) { runTournament();digitalWrite(AUTORUN_LED,LOW); }
   service();
   if(millis()-lastSample>=(stepKind==STEP_IDLE?200u:100u)) { lastSample=millis();sample(); }  // 5 Hz, 10 Hz in a step
 }
