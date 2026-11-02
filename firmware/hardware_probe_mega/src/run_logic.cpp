@@ -27,7 +27,7 @@ static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ?
 static int16_t i16(float v) { return int16_t(clampf(v, -32000, 32000)); }
 
 Runner::Runner(Io& io_, const Calib& cal_)
-    : io(io_), cal(cal_), why(0), goal(0), goalSet(false), goalLost(0), turnDir(0) {
+    : io(io_), cal(cal_), why(0), goal(0), goalSet(false), goalLost(0), turnDir(0), snapSum(0), snapped(false) {
   back.init(0.35f, 70);    // mm/ms beyond the soft-start dead time
   side.init(0.25f, 80);
   // Field 30 Oct: 120 / 80 PWM turned the robot; 80 PWM turned ~7 deg in a 120 ms coasting pulse.
@@ -179,6 +179,7 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
   float tWin = 0, dWin = d0;
   int16_t lastFront = us[FRONT];
   float dDecision = d0, vDecision = 0;
+  snapped = false;
   for (;;) {
     int16_t z[NUS];
     float dt;
@@ -197,6 +198,13 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
     }
     if (z[FRONT] != NOT_PINGED) lastFront = z[FRONT];
     float d = kf[FRONT].dist(), v = kf[FRONT].speed();
+    // First moment both side walls are tracked at the capture's spacing: snapshot for skewFrom (the
+    // heading over the rest of this straight drive)
+    if (snapSum && !snapped && live[LSIDE] && live[RSIDE] && blind[LSIDE] == 0 && blind[RSIDE] == 0 &&
+        fabsf(kf[LSIDE].dist() + kf[RSIDE].dist() - snapSum) < 120) {
+      for (uint8_t k = 0; k < NUS; ++k) snap[k] = live[k] ? i16(kf[k].dist()) : -1;
+      snapped = true;
+    }
     // Creep: speed falls with the distance left (full pwmMax 250 mm out, floorPwm at the target), so
     // the robot slows smoothly into the stop. Not moving at all over 400 ms raises only the floor, by 4.
     if (t - tWin >= 400) {
@@ -1205,7 +1213,7 @@ bool Runner::walkTo(int16_t target, int16_t us[NUS]) {
 }
 
 // ---- 2 Nov game plan: creep, straight back to N, combined omnidirectional moves ----------------
-static const int16_t APPROACH_MM = 200;   // stage 1: creep until the front reads ~20 cm
+static const int16_t APPROACH_MM = 500;   // stage 1: creep until the front reads ~50 cm (2 Nov field: 20 cm hit the wall)
 static const float STRAFE_EFF = 0.6f;     // sideways mm per forward mm at the same wheel power (rollers slip)
 static const float MOVE_MAX_MS = 2400;    // one combined move stays inside the gyro FIFO (yaw only: 2.5 s)
 
@@ -1276,6 +1284,16 @@ bool Runner::straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS]) {
   setGoal(y - th);
   TRY(rotateTo(goal, ROT_TOL, false));
   return measure(us);
+}
+
+// Heading check on a pose: a straight forward move of `dist` (front reading) and the side wall(s) of the
+// set give the heading (skewFrom), which is turned out; the caller aligns again afterwards.
+bool Runner::squareByMove(uint8_t set, float dist, int16_t us[NUS]) {
+  if (us[FRONT] <= 0) return true;
+  int16_t a[NUS];
+  memcpy(a, us, sizeof(a));
+  TRY(driveForward(us[FRONT] - dist, DRIVE_MAX_MS, DRIVE_PWM, us));
+  return straighten(set, a, us);
 }
 
 // One continuous omnidirectional move onto a calibrated pose: forward and sideways at the same time,
@@ -1358,7 +1376,7 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tol, int16_t us[NUS]) {
     if (polls % 8 == 1) io.event(RL_F("mpoll"), i16(t), i16(ex), i16(ey), pwm);
     if (doneX && doneY) break;
     if (mx > 0 && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm) ||
-                   (z[FRONT] > 0 && z[FRONT] < 40))) {
+                   (z[FRONT] > 0 && z[FRONT] < (ref[FRONT] != NONE && ref[FRONT] - 15 > 40 ? ref[FRONT] - 15 : 40)))) {
       io.event(RL_F("corner_stop"), i16(kf[L45].dist()), i16(kf[R45].dist()));
       end = 3;
       break;
@@ -1405,7 +1423,7 @@ bool Runner::align(Pose pose, uint8_t set, float target, float dead, uint8_t max
     float acc = accuracySet(pose, set, us);
     if (acc > best) best = acc;
     io.event(RL_F("align"), pose * 100 + move, hx ? i16(ex) : NONE, hy ? i16(ey) : NONE, i16(acc));
-    bool inBand = (!hx || fabsf(ex) <= dead) && (!hy || fabsf(ey) <= dead);
+    bool inBand = hx && hy && fabsf(ex) <= dead && fabsf(ey) <= dead;
     if (acc >= target || inBand || move >= maxMoves || (!hx && !hy)) {
       io.event(RL_F("aligned"), pose, i16(acc), i16(best), acc >= target ? 1 : 0);
       return true;
@@ -1416,14 +1434,16 @@ bool Runner::align(Pose pose, uint8_t set, float target, float dead, uint8_t max
 }
 
 // GAME PLAN (2 Nov, user):
-//  1 creep straight at the start heading until the front reads ~20 cm (a 45 deg beam under 10 cm stops it)
-//  2 straight back to N's front reading: the side walls give the heading on the way (skewFrom), turned
-//    out; then combined omnidirectional moves onto N's calibration until >= 95 %   [end of stage 1]
+//  1 creep straight at the start heading until the front reads ~50 cm (a 45 deg beam under 10 cm stops it)
+//  2 straight on to N's front reading: once both side walls are tracked, their change against the
+//    front's gives the heading (skewFrom), turned out; combined omnidirectional moves onto N (>= 95 %);
+//    a heading check (straight 80 mm forward, skew turned out) and align again       [end of stage 1]
 //  3 read the colour                                                                [end of stage 2]
 //  4 turn 90 deg in one motion (gyro); 5 align on the turned capture with front, front-45 and the side
-//    facing the main wall (front, L45, left side after a right turn) until >= 95 %
-//  6 straight forward to 150 mm short of the box (the side on the main wall gives the heading again)
-//  7 combined moves into the box until >= 98 %
+//    facing the main wall (>= 95 %), heading check (straight 100 mm forward), align again
+//  6 straight forward to 150 mm short of the box, the front and 45 deg beams guarding the walls (the
+//    side on the main wall gives the heading again); 7 combined moves into the box (>= 98 %), the
+//    front never closer than the box's front reading - 15 mm
 // An imperfect position never ends the run: each stage logs its accuracy and the run goes on.
 bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
   why = 0;
@@ -1442,10 +1462,16 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
   if (first <= 2 && last >= 2) {
     io.event(RL_F("step"), 2);
     memcpy(a, us, sizeof(a));
-    if (us[FRONT] > 0 && fabsf(float(us[FRONT] - n[FRONT])) > 15)
-      TRY(driveForward(n[FRONT], DRIVE_MAX_MS, DRIVE_PWM, us));        // 2: straight back to N's distance
+    if (us[FRONT] > 0 && fabsf(float(us[FRONT] - n[FRONT])) > 15) {
+      snapSum = n[LSIDE] + n[RSIDE];
+      TRY(driveForward(n[FRONT], CREEP_MAX_MS, DRIVE_PWM, us));        // 2: straight on to N's distance
+      snapSum = 0;
+      if (snapped) memcpy(a, snap, sizeof(a));
+    }
     TRY(straighten(SET_ALL, a, us));                                   //    heading from the side walls
-    TRY(align(N, SET_ALL, 95, 5, 8, us));                              //    combined moves onto N
+    TRY(align(N, SET_ALL, 95, 4, 10, us));                             //    combined moves onto N
+    TRY(squareByMove(SET_ALL, 80, us));                                //    heading check
+    TRY(align(N, SET_ALL, 95, 4, 10, us));
   }
   turnDir = forceTurn;
   if (first <= 3 && last >= 3) {
@@ -1458,7 +1484,11 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     turnDir = rg > split ? -1 : 1;   // red turns right, green turns left
     io.event(RL_F("colour"), i16(rg * 1000), i16(conf * 100), turnDir);
     TRY(turnOnce(turnDir > 0));                                        // 4
-    TRY(align(turnDir > 0 ? N_LEFT : N_RIGHT, turnDir > 0 ? SET_LEFT_TURN : SET_RIGHT_TURN, 95, 5, 6, us));   // 5
+    Pose turned = turnDir > 0 ? N_LEFT : N_RIGHT;
+    uint8_t set = turnDir > 0 ? SET_LEFT_TURN : SET_RIGHT_TURN;
+    TRY(align(turned, set, 95, 4, 8, us));                             // 5
+    TRY(squareByMove(set, 100, us));                                   //    heading check
+    TRY(align(turned, set, 95, 4, 8, us));
   }
   if (first <= 4 && last >= 4) {
     io.event(RL_F("step"), 4);

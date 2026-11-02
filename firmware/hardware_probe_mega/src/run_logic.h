@@ -191,6 +191,10 @@ class Runner {
   bool driveTo(Pose pose, uint8_t set, float tol, int16_t us[NUS]);
   bool align(Pose pose, uint8_t set, float target, float dead, uint8_t maxMoves, int16_t us[NUS]);
   bool straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS]);
+  bool squareByMove(uint8_t set, float dist, int16_t us[NUS]);
+  int16_t snapSum;     // driveForward: side-wall spacing (L + R) to snapshot at, 0 = off
+  bool snapped;        // driveForward saw both side walls at that spacing: snap holds front / sides then
+  int16_t snap[NUS];
 };
 
 }  // namespace rl
