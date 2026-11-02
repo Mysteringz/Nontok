@@ -524,7 +524,7 @@ bool Runner::driveSide(Pose pose, float frac, int16_t us[NUS], bool* used) {
     eDecision = e;
     rDecision = rate;
     if (polls % 8 == 1) io.event(RL_F("spoll"), i16(t), i16(e), i16(rate), pwm);
-    if (s * (e + rate * stopTauY - goalE) <= 2) break;
+    if (t >= 150 && s * (e + rate * stopTauY - goalE) <= 2) break;   // not before the speed estimate settles
     if (t >= 2000 || (useL && blindL >= 4) || (useR && blindR >= 4)) break;
   }
   #undef EY
@@ -541,7 +541,7 @@ bool Runner::driveSide(Pose pose, float frac, int16_t us[NUS], bool* used) {
   }
   io.event(RL_F("strafe"), i16(e0), i16(goalE), i16(stopTauY * 1000), pwm);
   if (hasBefore && io.yaw(&after)) {   // strafes turn this robot: learn the compensation
-    wcomp[1][s > 0] = int8_t(clampf(roundf(w - 1.0f * (after - before)), -60, 60));
+    wcomp[1][s > 0] = int8_t(clampf(roundf(w - 1.6f * (after - before)), -60, 60));   // 2 Nov: strafes turned 3-7 deg
   }
   (void)was;
   return true;
@@ -1371,7 +1371,7 @@ bool Runner::faceWall(int16_t us[NUS]) {
 
 // Turn out the heading measured over the straight move from readings a to us (skewFrom); the gyro then
 // holds the squared heading. Without a usable side wall the heading is kept.
-bool Runner::straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS], bool* known) {
+bool Runner::straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS], bool* known, float maxTurn) {
   float th, y;
   if (known) *known = false;
   bool fit = driveSkew(&th);
@@ -1380,7 +1380,7 @@ bool Runner::straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS], bool
   if (!io.yaw(&y)) return true;
   if (known) *known = true;
   io.event(RL_F("skew_src"), fit ? 1 : 0);
-  th = clampf(th, -35, 35);
+  th = clampf(th, -maxTurn, maxTurn);
   io.event(RL_F("skew"), i16(th * 10), us[FRONT] - a[FRONT]);
   if (fabsf(th) <= 1.5f) { setGoal(y); return true; }
   setGoal(y - th);
@@ -1507,8 +1507,9 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[
     posErr(ref, set, p, &exP, &h1, &eyP, &h2);
     rx = live[FRONT] ? kf[FRONT].speed() : 0;
     ry = stopTauY > 0 ? (eyP - ey) / stopTauY : 0;
-    if (!doneX && (fabsf(exP) <= stopX || exP * ex0 < 0)) doneX = true;
-    if (!doneY && (fabsf(eyP) <= stopY || eyP * ey0 < 0)) doneY = true;
+    // not in the first 150 ms: the speed estimate is still noise (2 Nov: moves ended after 55 ms, unmoved)
+    if (t >= 150 && !doneX && (fabsf(exP) <= stopX || exP * ex0 < 0)) doneX = true;
+    if (t >= 150 && !doneY && (fabsf(eyP) <= stopY || eyP * ey0 < 0)) doneY = true;
     if (polls % 8 == 1) io.event(RL_F("mpoll"), i16(t), i16(ex), i16(ey), pwm);
     if (doneX && doneY) break;
     bool nearWall = !live[FRONT] || kf[FRONT].dist() < CORNER_ZONE;   // see driveForward
@@ -1589,6 +1590,51 @@ bool Runner::align(Pose pose, uint8_t set, float target, float deadX, float dead
   }
 }
 
+// Into the box (2 Nov field: sideways moves at the wall each turned the robot 3-7 deg, the heading fix
+// then moved it sideways again and it went in and out of the spot). Sideways is settled out in the open,
+// then one straight creep goes in, and only small single-axis fixes are made at the wall:
+//  1 from ~180 mm short: continuous strafes onto the box's line (side sensor on the main wall), heading
+//    held between them, until within 5 mm (3 strafes at most)
+//  2 one slow straight creep onto the box's front reading; the side wall fitted over it gives the heading,
+//    turned out (at most 3 deg this close to the wall)
+//  3 fixes, one axis at a time: front by a straight drive if off by > 5 mm, sideways by a strafe only if
+//    off by > 8 mm, heading held (<= 3 deg near the wall); 4 rounds at most
+bool Runner::parkIn(Pose box, uint8_t set, int16_t us[NUS]) {
+  const int16_t* ref = cal.ref[box];
+  float d[NUS], ex, ey;
+  bool hx, hy, used;
+  for (uint8_t i = 0; i < 3; ++i) {                                   // 1
+    toF(us, d);
+    posErr(ref, set, d, &ex, &hx, &ey, &hy);
+    io.event(RL_F("park_line"), i, hy ? i16(ey) : NONE, us[FRONT]);
+    if (!hy || fabsf(ey) <= 5) break;
+    TRY(driveSide(box, 0.9f, us, &used));
+    if (!used) break;
+    TRY(hold(us));
+  }
+  int16_t a[NUS];                                                     // 2
+  memcpy(a, us, sizeof(a));
+  if (us[FRONT] > 0 && us[FRONT] - ref[FRONT] > 15) {
+    skewMode = 1 + set;
+    TRY(driveForward(ref[FRONT], CREEP_MAX_MS, DRIVE_PWM, us));
+    skewMode = 0;
+    if (cornered) TRY(recover(set, us));
+    else TRY(straighten(set, a, us, 0, 3));
+  }
+  for (uint8_t i = 0; i < 4; ++i) {                                   // 3
+    TRY(measure(us));
+    toF(us, d);
+    posErr(ref, set, d, &ex, &hx, &ey, &hy);
+    io.event(RL_F("park_fix"), i, hx ? i16(ex) : NONE, hy ? i16(ey) : NONE);
+    bool fixX = hx && fabsf(ex) > 5, fixY = hy && fabsf(ey) > 8;
+    if (!fixX && !fixY) break;
+    if (fixX) TRY(driveForward(ref[FRONT], DRIVE_MAX_MS, DRIVE_PWM, us));
+    else TRY(driveSide(box, 0.8f, us, &used));
+    TRY(hold(us));
+  }
+  return true;
+}
+
 // GAME PLAN (2 Nov, user; second field day):
 //  1 creep straight at the start heading until the front reads ~50 cm (a 45 deg beam under 10 cm stops it)
 //  2 straight on to N's front reading: once both side walls are tracked, their change against the
@@ -1597,9 +1643,9 @@ bool Runner::align(Pose pose, uint8_t set, float target, float deadX, float dead
 //    (the short heading-check move was dropped: over 8 cm the side noise gave a 13 deg error)
 //  3 read the colour; 4 turn 90 deg in one motion (gyro)
 //  5 no settling on the turned capture (it was 11 cm off N's newer capture and cost ~1 min): straight
-//    forward to 150 mm short of the box, the front and 45 deg beams guarding the walls, the side on the
-//    main wall giving the heading; 6 combined moves into the box (>= 98 %), front never closer than the
-//    box's front reading - 15 mm
+//    forward to 180 mm short of the box, the front and 45 deg beams guarding the walls, the side on the
+//    main wall giving the heading; 6 parkIn: sideways settled there, one straight creep in, small
+//    single-axis fixes (front 5 mm, side 8 mm, heading 1.5 deg)
 // An imperfect position never ends the run: each stage logs its accuracy and the run goes on.
 bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
   why = 0;
@@ -1670,11 +1716,12 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     if (tr[FRONT] != NONE) TRY(faceExpected(tr[FRONT], us));           //    the front must see the side wall
     memcpy(a, us, sizeof(a));
     skewMode = 1 + set;
-    TRY(walkTo(cal.ref[box][FRONT] + 150, us));                       // 5: straight, slowly
+    TRY(walkTo(cal.ref[box][FRONT] + 180, us));                       // 5: straight, slowly, to 180 mm short
     skewMode = 0;
     if (cornered) TRY(recover(set, us));                               //    stopped at a wall: back off, re-localize
     else TRY(straighten(set, a, us));                                  //    heading from the main wall
-    TRY(align(box, set, 98, 4, 4, 8, us));                             // 6: into the box
+    TRY(parkIn(box, set, us));                                         // 6: sideways in the open, straight in, small fixes
+    TRY(measure(us));
     float yy;
     io.event(RL_F("parked"), us[FRONT], cal.ref[box][FRONT], io.yaw(&yy) && goalSet ? i16((yy - goal) * 10) : NONE);
   }

@@ -191,7 +191,8 @@ class Runner {
   bool faceWall(int16_t us[NUS]);
   bool driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[NUS]);
   bool align(Pose pose, uint8_t set, float target, float deadX, float deadY, uint8_t maxMoves, int16_t us[NUS]);
-  bool straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS], bool* known = 0);
+  bool straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS], bool* known = 0, float maxTurn = 35);
+  bool parkIn(Pose box, uint8_t set, int16_t us[NUS]);
   bool faceExpected(int16_t want, int16_t us[NUS]);
   bool squareByMove(uint8_t set, float dist, int16_t us[NUS]);
   int16_t snapSum;     // driveForward: side-wall spacing (L + R) to snapshot at, 0 = off
