@@ -18,6 +18,7 @@
 #include "../../core_robot_mega/include/frequency_color.h"
 #include "../../core_robot_mega/include/mpu_gyro.h"
 #include <EEPROM.h>
+#include <U8x8lib.h>
 #include "run_logic.h"
 extern "C" uint8_t colorPulseBurst();
 static_assert(F_CPU==core::COLOR_CPU_HZ,"Probe sampling requires a 16 MHz Mega");
@@ -38,6 +39,9 @@ static uint8_t runFirst=1,runLast=4;static int8_t runForceTurn=0;
 // Bluetooth does not, so a computer can connect and watch the run.
 static const int AUTORUN_ADDRESS=3964;static const uint8_t AUTORUN_MAGIC=0xA5;
 static const uint16_t AUTORUN_MS=10000;static const uint8_t AUTORUN_LED=13;
+// What the OLED shows about the run (oledService): step 1-4, colour turn (+1 left/green, -1 right/red)
+// and the result of the last run (0 none, 1 parked, 2 stopped, with the controller's reason).
+static uint8_t runStepNow=0,uiResult=0;static int8_t runTurnNow=0;static char uiReason[17]="";
 static uint32_t autorunAt=0;static bool autorunPending=false;
 static bool autorunUsbCancels=false;   // power-on countdowns only; a button countdown is deliberate
 static void autorunCancel(const __FlashStringHelper* why);
@@ -923,6 +927,14 @@ static void autorunCancel(const __FlashStringHelper* why) {
   autorunPending=false;digitalWrite(AUTORUN_LED,LOW);
   out.print(F("{\"type\":\"autorun_cancelled\",\"by\":\""));out.print(why);out.println(F("\"}"));
 }
+// Why the robot cannot start a run (0 = ready): no stored calibration, no gyro, or the gyro is still
+// zeroing (it needs ~2 s of stillness after power-on).
+static uint8_t notReady() {
+  if(!calValid) return 1;
+  if(!gyroRunning) return 2;
+  if(!biasValid) return 3;
+  return 0;
+}
 static uint8_t btnPressMask=0;
 static void buttonEvent(const __FlashStringHelper* action) {
   out.print(F("{\"type\":\"button\",\"action\":\""));out.print(action);out.print(F("\",\"pins\":"));out.print(btnPressMask);
@@ -938,11 +950,67 @@ static void buttonService() {
   if(btnIgnoreUntilRelease||now<1500) return;
   if(runActive) { stopMotors();runStop=true;buttonEvent(F("stop")); }
   else if(autorunPending) { autorunPending=false;digitalWrite(AUTORUN_LED,LOW);buttonEvent(F("cancel")); }
-  else if(!calValid) out.println(F("{\"error\":\"BUTTON_NEEDS_CALSAVE\"}"));
+  else if(uint8_t nr=notReady()) {   // only in the ready mode (the OLED says READY)
+    out.print(F("{\"type\":\"button\",\"action\":\"refused\",\"why\":\""));
+    out.print(nr==1?F("no_cal"):nr==2?F("no_gyro"):F("gyro_zeroing"));out.println(F("\"}"));
+  }
   else {
-    autorunPending=true;autorunUsbCancels=false;autorunAt=now+AUTORUN_MS;
+    uiResult=0;autorunPending=true;autorunUsbCancels=false;autorunAt=now+AUTORUN_MS;
     buttonEvent(F("start"));
   }
+}
+// ---- OLED: 128x32 SSD1306 at 0x3c, 4 rows of 16 characters; the shield's IMU/IIC header shares the bus
+// with the gyro. Drawn only while the motors are off (motor noise corrupts the bus, see QUIETGYRO),
+// only the rows that changed, and given up for good after any I2C timeout.
+static U8X8_SSD1306_128X32_UNIVISION_HW_I2C oled(U8X8_PIN_NONE);
+static bool oledOk=false;static uint32_t oledLastMs=0;
+static char shownWord[9]={1},shownL2[17]={1},shownL3[17]={1};   // never equal to a real text: first draw
+static void oledBegin() {
+  Wire.beginTransmission(0x3c);
+  bool fitted=Wire.endTransmission()==0;
+  out.print(F("{\"type\":\"oled\",\"fitted\":"));out.print(fitted);out.println('}');
+  if(!fitted) { i2cFailed();return; }   // not fitted: leave the bus alone
+  oled.setBusClock(100000);oled.setI2CAddress(0x3c<<1);oled.begin();
+  oled.setFont(u8x8_font_chroma48medium8_r);
+  i2cBegin();   // begin() restarted the bus: back to 100 kHz with the 25 ms timeout
+  oledOk=true;
+}
+static void oledPut(uint8_t row,char* shown,const char* want,uint8_t width,bool big) {
+  char pad[17];uint8_t n=strlen(want);
+  for(uint8_t i=0;i<width;++i) pad[i]=i<n?want[i]:' ';
+  pad[width]=0;
+  if(!strcmp(pad,shown)) return;
+  if(big) oled.draw2x2String(0,row,pad);else oled.drawString(0,row,pad);
+  strcpy(shown,pad);
+}
+static void oledService() {
+  if(!oledOk||motorsLive||pulsing||millis()-oledLastMs<150) return;
+  oledLastMs=millis();
+  char word[9]="",l2[17]="",l3[17]="";
+  if(runActive) {
+    snprintf(word,sizeof word,"RUN %u/4",runStepNow?runStepNow:1);
+    strcpy(l2,runStepNow==2?"MATCH N":runStepNow==3?(runTurnNow>0?"TURN LEFT":runTurnNow<0?"TURN RIGHT":"COLOUR + TURN"):
+              runStepNow==4?"PARK IN BOX":"APPROACH+SQUARE");
+    strcpy(l3,"PRESS TO STOP");
+  } else if(autorunPending) {
+    snprintf(word,sizeof word,"START %u",unsigned((autorunAt-millis()+999)/1000));
+    strcpy(l2,"STEP AWAY");strcpy(l3,"PRESS TO CANCEL");
+  } else if(uiResult==1) {
+    strcpy(word,"PARKED");
+    strcpy(l2,runTurnNow>0?"GREEN: LEFT BOX":runTurnNow<0?"RED: RIGHT BOX":"");
+    strcpy(l3,notReady()?"":"PRESS TO RERUN");
+  } else if(uiResult==2) {
+    strcpy(word,"STOPPED");strcpy(l2,uiReason);strcpy(l3,notReady()?"":"PRESS TO RERUN");
+  } else switch(notReady()) {
+    case 1: strcpy(word,"NO CAL");strcpy(l2,"SEND CALSAVE");break;
+    case 2: strcpy(word,"NO GYRO");strcpy(l2,"CHECK I2C");break;
+    case 3: strcpy(word,"ZEROING");strcpy(l2,"KEEP STILL");break;
+    default: strcpy(word,"READY");strcpy(l2,"PRESS BUTTON");strcpy(l3,btHostPresent()?"BT OK":"BT --");
+  }
+  oledPut(0,shownWord,word,8,true);
+  oledPut(2,shownL2,l2,16,false);
+  oledPut(3,shownL3,l3,16,false);
+  if(Wire.getWireTimeoutFlag()) { i2cFailed();oledOk=false; }   // never let the display hang the gyro bus
 }
 static void commands(Stream& in,LineReader& r,bool usb) {
   if(usb&&autorunUsbCancels&&in.available()) autorunCancel(F("usb"));
@@ -983,6 +1051,7 @@ void setup() {
   gyroBegin();
   scan();
   calLoad();calShow();
+  oledBegin();
   pinMode(AUTORUN_LED,OUTPUT);digitalWrite(AUTORUN_LED,LOW);
   for(uint8_t i=0;i<BTN_COUNT;++i) pinMode(BTN_FIRST+i,INPUT_PULLUP);
   btnRaw=btnStable=(btnMask()&BTN_START_MASK)==0;btnIgnoreUntilRelease=!btnStable;btnChangedAt=millis();
@@ -996,6 +1065,7 @@ void setup() {
 }
 static void service() {
   buttonService();
+  oledService();
   commands(Serial,usbReader,true);
   commands(Serial3,btReader,false);
   gyroService();
@@ -1059,13 +1129,15 @@ class MegaIo : public rl::Io {
   }
   uint16_t lost() override { return overflows+gyroRestarts+gyroResets; }
   void event(const char* name,int16_t a,int16_t b,int16_t c,int16_t d) override {
+    if(!strcmp_P(name,PSTR("step"))) runStepNow=uint8_t(a);
+    else if(!strcmp_P(name,PSTR("colour"))) runTurnNow=int8_t(c);
     out.print(F("{\"type\":\"run\",\"ev\":\""));out.print(reinterpret_cast<const __FlashStringHelper*>(name));
     out.print(F("\",\"v\":["));out.print(a);out.print(',');out.print(b);out.print(',');out.print(c);out.print(',');out.print(d);
     out.print(F("],\"ms\":"));out.print(millis());out.println('}');
   }
 };
 static void runTournament() {
-  runRequested=false;runActive=true;runStop=false;
+  runRequested=false;runActive=true;runStop=false;runStepNow=0;runTurnNow=0;uiResult=0;
   gyroQuiet=true;if(!gyroRunning) gyroBegin();   // no I2C while a motor runs
   out.print(F("{\"type\":\"run_start\",\"first\":"));out.print(runFirst);out.print(F(",\"last\":"));out.print(runLast);out.println('}');
   MegaIo io;rl::Runner runner(io,calRam);
@@ -1077,6 +1149,8 @@ static void runTournament() {
   }
   bool ok=runStop?false:runner.run(runFirst,runLast,runForceTurn);
   stopMotors();runActive=false;
+  uiResult=ok?1:2;runTurnNow=runner.turn();uiReason[0]=0;
+  if(!ok) { if(runner.reason()) strncpy_P(uiReason,runner.reason(),16);else strcpy(uiReason,"BY STOP");uiReason[16]=0; }
   out.print(F("{\"type\":\"run_end\",\"result\":\""));out.print(ok?F("done"):F("stopped"));
   out.print(F("\",\"reason\":\""));
   if(!ok&&runner.reason()) out.print(reinterpret_cast<const __FlashStringHelper*>(runner.reason()));
