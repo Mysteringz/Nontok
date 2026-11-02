@@ -84,6 +84,7 @@ kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px 
   <span class="row" style="margin:0">
     <select id="port" style="font:inherit;padding:4px 6px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)"></select>
     <button id="connect">Connect</button><button id="disconnect">Disconnect</button>
+    <button id="bt-repair" title="Remove and pair the robot's Bluetooth module again (PIN 1234), then connect to it">Re-pair Bluetooth</button>
   </span>
   <span class="badge" id="link">connecting…</span>
   <span class="badge" id="age">no data</span>
@@ -684,6 +685,7 @@ async function loadPorts() {
 const connectTo = port => fetch('/api/connect', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ port }) });
 $('connect').onclick = () => { if ($('port').value) connectTo($('port').value); };   // also retries the same port
 $('disconnect').onclick = () => connectTo(null);
+$('bt-repair').onclick = () => fetch('/api/bt_repair', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
 loadPorts(); setInterval(loadPorts, 5000);
 
 $('mark').onsubmit = e => { e.preventDefault(); const text = $('mark-text').value.trim(); if (!text) return;

@@ -12,6 +12,7 @@ import collections
 import datetime
 import json
 import re
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,6 +46,32 @@ LIGHT_PINS = ("A0", "A7", "A2", "A6")  # Firmware adc[] order; physically left t
 
 BLUETOOTH_TAGS = ("DIVA", "FEETWASHER", "HC-0", "HC0", "DSD", "JDY", "BT0", "BT-")
 SKIP_PORTS = ("Bluetooth-Incoming-Port", "debug-console")
+BT_PIN = "1234"   # the robot's HC-06 module
+
+
+# macOS and the HC-06 (2 Nov): once a Bluetooth serial port has been closed, reopening it gives
+# no data although the Mac reports the device connected; the module itself is fine (it answers
+# AT, so it is not linked to anyone). Removing the pairing, pairing again and connecting brings
+# a working port back. blueutil (brew install blueutil) does that from here.
+def blueutil(*args, timeout=30):
+    try:
+        return subprocess.run(["blueutil", *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def bt_address():
+    """The robot module's address from blueutil's paired or recent devices (its stored name can
+    carry a stray newline), or None."""
+    for listing in ("--paired", "--recent"):
+        r = blueutil(listing)
+        if r is None:
+            return None
+        for line in r.stdout.splitlines():
+            m = re.match(r'address: ([0-9a-f-]{17}),.*name: "([^"\n]*)', line)
+            if m and any(tag in m.group(2).upper() for tag in BLUETOOTH_TAGS):
+                return m.group(1)
+    return None
 
 
 def ports():
@@ -161,6 +188,10 @@ def saved_captures():
     return rows
 
 
+class BtStale(Exception):
+    """The Bluetooth port gives no data: no link formed, or it was lost."""
+
+
 class Link:
     def __init__(self, port, log_path):
         self.port, self.log_path = port, log_path
@@ -170,7 +201,32 @@ class Link:
         self.pending = collections.deque()
         self.status = "starting"
         self.generation = 0  # Bumped by every select(), so re-selecting a port reconnects it.
+        self.bt_addr = bt_address()   # kept: once unpaired the module drops off the paired list
+        self.repair_requested = False
         threading.Thread(target=self.run, daemon=True).start()
+
+    def bt_repair(self):
+        """Unpair, pair (PIN 1234), connect; returns the Bluetooth port once it exists, or None."""
+        addr = self.bt_addr or bt_address()
+        if not addr:
+            self.status = "Bluetooth re-pair impossible: install blueutil, or pair DIVA once in System Settings"
+            return None
+        self.bt_addr = addr
+        self.status = "re-pairing Bluetooth %s (unpair, pair PIN %s, connect)" % (addr, BT_PIN)
+        blueutil("--unpair", addr)
+        time.sleep(2)
+        blueutil("--pair", addr, BT_PIN)
+        time.sleep(1)
+        for attempt in range(3):
+            blueutil("--connect", addr)
+            for _ in range(8):
+                port = next((p["device"] for p in ports() if p["kind"] == "bluetooth"), None)
+                if port:
+                    self.status = "re-paired; opening " + port
+                    return port
+                time.sleep(1)
+        self.status = "Bluetooth re-pair failed: is the robot on? If so, power-cycle it and press Re-pair"
+        return None
 
     def add(self, record):
         record["received_at"] = utc()
@@ -194,6 +250,16 @@ class Link:
                 self.status = "not connected"
                 time.sleep(0.3)
                 continue
+            if port == "bluetooth-repair":   # no Bluetooth port yet: pair first
+                self.repair_requested = False
+                new = self.bt_repair()
+                if self.generation == generation:
+                    if new:
+                        self.port = new
+                    else:
+                        time.sleep(10)
+                continue
+            stale = False
             bluetooth = any(tag in port.upper() for tag in BLUETOOTH_TAGS)
             device = serial.Serial()
             device.port, device.baudrate, device.timeout = port, 115200, 0.1
@@ -205,7 +271,8 @@ class Link:
                 buffer = b""
                 last_full = None  # Latest full sample, for merging F lines.
                 next_ping = 0
-                last_rx = time.time()
+                last_rx = opened = time.time()
+                got_data = False
                 while self.generation == generation:
                     # Bluetooth firmware only transmits within 5 s of a PING.
                     if time.time() >= next_ping:
@@ -215,14 +282,12 @@ class Link:
                         device.write((self.pending.popleft() + "\n").encode("ascii"))
                     chunk = device.read(512)
                     if chunk:
-                        last_rx = time.time()
+                        last_rx, got_data = time.time(), True
                         self.status = "connected " + port
-                    elif time.time() - last_rx > 20 and bluetooth:
-                        # Never close a Bluetooth port on silence: after macOS closes its end, the
-                        # HC-06 (V2.3) stays "connected" to nobody until it loses power, ignoring
-                        # new links and AT commands (2 Nov). Keep the port and keep pinging.
-                        self.status = ("no data from %s for %d s: if it lasts, power-cycle the robot, "
-                                       "then pair DIVA again (PIN 1234)" % (port, time.time() - last_rx))
+                    elif bluetooth and (self.repair_requested or (not got_data and time.time() - opened > 8)
+                                        or (got_data and time.time() - last_rx > 20)):
+                        # No link formed, or it was lost: re-pair (see blueutil above), then reopen.
+                        raise BtStale()
                     elif time.time() - last_rx > 20:
                         raise serial.SerialException("no data for 20 s; reconnecting")
                     elif time.time() - last_rx > 3:
@@ -246,9 +311,12 @@ class Link:
                             last_full = record
                         self.add(record)
                     buffer = buffer[-4096:]
+            except BtStale:
+                stale = True
             except (serial.SerialException, OSError) as error:
                 if self.generation == generation:
                     self.status = "disconnected: %s" % error
+                    stale = bluetooth   # a Bluetooth port that fails to open (gone after unpairing): re-pair
             finally:
                 if device.is_open:
                     try:
@@ -256,8 +324,22 @@ class Link:
                     except (serial.SerialException, OSError):
                         pass
                 device.close()
+            if self.generation == generation and (stale or self.repair_requested):
+                self.repair_requested = False
+                new = self.bt_repair()
+                if new and self.generation == generation:
+                    self.port = new
+                    continue
+                time.sleep(10)   # robot off or out of range: try again later, not in a tight loop
             if self.generation == generation:
                 time.sleep(1)
+
+    def request_repair(self):
+        """Re-pair the robot's Bluetooth module and switch to its port (page button)."""
+        self.repair_requested = True
+        if not self.port or not any(t in self.port.upper() for t in BLUETOOTH_TAGS):
+            self.port = "bluetooth-repair"   # the loop re-pairs, then opens the new port
+            self.generation += 1
 
     def send(self, command):
         if command == "STOP":
@@ -321,6 +403,9 @@ def handler(link):
                 command = body.get("command")
             except (ValueError, AttributeError):
                 body, command = {}, None
+            if self.path == "/api/bt_repair":
+                link.request_repair()
+                return self.send({"repairing": True})
             if self.path == "/api/connect":
                 port = body.get("port")
                 if port and port not in [p["device"] for p in ports()]:
@@ -361,6 +446,8 @@ def main():
     stamp = datetime.datetime.now().strftime("%Y-%m-%d/probe-live-%H%M%S.jsonl")
     log_path = ROOT / ".local-data" / "hardware-probe" / stamp
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.bluetooth and not bluetooth and not args.port:
+        port = "bluetooth-repair"   # no Bluetooth port yet: pair first
     link = Link(port, log_path)
     server = ThreadingHTTPServer(("127.0.0.1", args.http), handler(link))
     print("Probe dashboard: http://127.0.0.1:%d  (serial %s, log %s)" % (args.http, port or "none: pick one on the page", log_path), flush=True)
