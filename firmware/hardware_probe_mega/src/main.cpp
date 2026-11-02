@@ -278,40 +278,48 @@ static void fifoRestart() {
   gyroWrite(core::MPU_USER_CTRL,core::MPU_USER_FIFO_RESET);
   gyroWrite(core::MPU_USER_CTRL,core::MPU_USER_FIFO_ON);
 }
-// Drain whole XYZ frames. Status is read first: any register read clears it.
-static uint16_t gyroDrain(float* sum,float* squares) {
-  uint8_t status,count[2],data[30]; // Wire buffers 32 bytes: five XYZ frames.
+// Drain whole yaw (Z) samples (see mpuSetup). Status is read first: any register read clears it.
+// trace (sweeps): called after every sample with its index and the sample count found, so a caller
+// can give each ping taken while the motors ran the heading at its time.
+static const uint8_t GYRO_FRAME=2;
+typedef void (*GyroTrace)(uint16_t index,uint16_t total);
+static uint16_t gyroDrain(float* sum,float* squares,GyroTrace trace=0) {
+  uint8_t status,count[2],data[30]; // Wire buffers 32 bytes: fifteen Z samples.
   if(!reg(gyroAddress,core::MPU_INT_STATUS,&status,1)||
      !reg(gyroAddress,core::MPU_FIFO_COUNT,count,2)) { ++busErrors;return 0; }
   uint16_t bytes=(uint16_t(count[0])<<8)|count[1];
-  // The MPU6050 (WHO_AM_I 0x68) has a 1024-byte FIFO, ~0.85 s of gyro frames: QUIETGYRO
-  // relies on it across a whole move. Other models keep the 512-byte family minimum.
+  // The MPU6050 (WHO_AM_I 0x68) has a 1024-byte FIFO, 2.5 s of yaw samples: QUIETGYRO relies on
+  // it across a whole move. Other models keep the 512-byte family minimum.
   uint16_t fifoLimit=gyroWho==0x68?1000:core::MPU_FIFO_BYTES_MIN;
   if((status&core::MPU_INT_FIFO_OVERFLOW)||bytes>=fifoLimit) {
     ++overflows;anglesValid=false;fifoRestart();return 0;
   }
-  uint16_t drained=0;bytes-=bytes%6;
+  uint16_t drained=0;bytes-=bytes%GYRO_FRAME;
+  const uint16_t total=bytes/GYRO_FRAME;
   while(bytes) {
     uint8_t chunk=bytes>sizeof(data)?sizeof(data):bytes;
     if(!reg(gyroAddress,core::MPU_FIFO_RW,data,chunk)) {
       ++busErrors;anglesValid=false;fifoRestart();return drained;
     }
-    for(uint8_t at=0;at<chunk;at+=6,++drained) for(uint8_t axis=0;axis<3;++axis) {
-      int16_t raw=core::mpuWord(data+at+axis*2);lastRaw[axis]=raw;
+    for(uint8_t at=0;at<chunk;at+=GYRO_FRAME,++drained) {
+      int16_t raw=core::mpuWord(data+at);lastRaw[2]=raw;
       if(core::mpuSaturated(raw)) { ++saturated;anglesValid=false; }
-      angle[axis]+=core::mpuSampleDegrees(raw,bias[axis]);
-      if(sum) { sum[axis]+=raw;squares[axis]+=float(raw)*raw; }
+      angle[2]+=core::mpuSampleDegrees(raw,bias[2]);
+      if(sum) { sum[2]+=raw;squares[2]+=float(raw)*raw; }
+      if(trace) trace(drained,total);
     }
     bytes-=chunk;
   }
   frames+=drained;if(drained) lastFrameMs=millis();
   return drained;
 }
+// Only the yaw axis (Z) goes into the FIFO: 2 bytes a sample at 200 Hz, so the MPU6050's 1024 bytes
+// hold 2.5 s instead of 0.85 s with all three axes. That is room for a smooth sweep, a long drive or
+// a 90 deg turn with no I2C while the motors run (QUIETGYRO). X/Y are not used for control.
 static bool mpuSetup() {
   bool ok=true;
   for(const core::MpuWrite& w:core::MPU_SETUP) ok=gyroWrite(w.reg,w.value)&&ok;
-  return gyroWrite(core::MPU_FIFO_EN,core::MPU_FIFO_GYRO_BIT[0]|core::MPU_FIFO_GYRO_BIT[1]|
-    core::MPU_FIFO_GYRO_BIT[2])&&ok;
+  return gyroWrite(core::MPU_FIFO_EN,core::MPU_FIFO_GYRO_BIT[2])&&ok;
 }
 // Noise or a supply dip can reset the MPU (back to sleep) or wedge its FIFO. Re-apply the
 // setup without the 2 s re-zero: the bias stays valid, the integrated angles do not.
@@ -964,7 +972,7 @@ static uint8_t notReady() {
   if(!calValid) return 1;
   if(!gyroRunning) return 2;
   if(!biasValid) return 3;
-  if(!usOk(2)) return 4;   // front ultrasonic: the approach and wall sweep need it
+  if(!usOk(2)) return 4;   // front ultrasonic: the drive to N and the wall sweep need it
   if(!clrOk) return 5;     // colour sensor: the turn decision needs it
   return 0;
 }
@@ -1038,8 +1046,8 @@ static void oledService() {
   char word[9]="",l2[17]="",l3[17]="";
   if(runActive) {
     snprintf(word,sizeof word,"RUN %u/4",runStepNow?runStepNow:1);
-    strcpy(l2,runStepNow==2?"MATCH N":runStepNow==3?(runTurnNow>0?"TURN LEFT":runTurnNow<0?"TURN RIGHT":"COLOUR + TURN"):
-              runStepNow==4?"PARK IN BOX":"APPROACH+SQUARE");
+    strcpy(l2,runStepNow==2?"SETTLE ON N":runStepNow==3?(runTurnNow>0?"TURN LEFT":runTurnNow<0?"TURN RIGHT":"COLOUR + TURN"):
+              runStepNow==4?"PARK IN BOX":"WALK + STRAIGHTEN");
     strcpy(l3,"PRESS TO STOP");
   } else if(autorunPending) {
     snprintf(word,sizeof word,"START %u",unsigned((autorunAt-millis()+999)/1000));
@@ -1134,6 +1142,14 @@ static void service() {
 }
 // The robot side of the run controller (run_logic.cpp). Every wait keeps the firmware going:
 // commands (STOP ends the run), watchdog, gyro, and the 5 Hz samples to USB and Bluetooth.
+// Sweep heading reconstruction (MegaIo::sweep): ping times since the sweep began, and where to put
+// each ping's heading as the gyro FIFO is drained after the stop.
+static uint16_t swAt[96];static float* swYaw;static uint8_t swN,swNext;static uint32_t swSpan;
+static void swTrace(uint16_t index,uint16_t total) {
+  // the FIFO's samples are spread evenly over the sweep: sample `index` ends at (index+1)/total of it
+  uint32_t t=uint32_t(float(index+1)*swSpan/total);
+  while(swNext<swN&&swAt[swNext]<=t) swYaw[swNext++]=yawDeg();
+}
 class MegaIo : public rl::Io {
  public:
   bool pump() {
@@ -1167,31 +1183,81 @@ class MegaIo : public rl::Io {
     *rg=rgbc[1]?float(rgbc[0])/rgbc[1]:0;
     return true;
   }
-  bool pulse(int8_t x,int8_t y,int8_t w,uint8_t pwm,uint16_t ms) override {
-    if(!startPulse(x,y,w,pwm,ms)) return false;
-    uint32_t t0=millis();
-    while(pulsing||motorsLive) {
-      if(!pump()) return false;
-      if(millis()-t0>ms+1000u) { stopMotors();return false; }
+  // Motors on for ms, serviced (STOP, watchdog) but no full sample() while moving (it blocks ~180 ms
+  // and would stretch the move); the watchdog deadline is set past the soft stop.
+  bool runFor(uint16_t ms,int16_t* fronts=0) {
+    motorDeadline=millis()+ms+800;
+    for(uint32_t t0=millis();millis()-t0<ms;) { service();if(runStop) { stopMotors();return false; } if(fronts) sweepPing(fronts); }
+    return true;
+  }
+  // Soft stop: outputs ramp to 0 at the soft-start rate (rampMotors), then ~60 ms of short brake
+  // (TB6612 IN1 = IN2 = HIGH), then all off. No coasting: a small move stays small.
+  bool softStop(int16_t* fronts=0) {
+    for(uint8_t m=0;m<4;++m) motorTarget[m]=0;
+    for(uint32_t t=millis();millis()-t<300;) {
+      service();if(runStop) { stopMotors();return false; }
+      if(fronts) sweepPing(fronts);
+      bool still=true;for(uint8_t m=0;m<4;++m) if(motorNow[m]) still=false;
+      if(still) break;
     }
-    return wait(350);   // settle before measuring
+    for(uint8_t m=0;m<4;++m) { analogWrite(pwm[m],0);digitalWrite(motorIn1[m],HIGH);digitalWrite(motorIn2[m],HIGH);digitalWrite(pwm[m],HIGH); }
+    for(uint32_t t=millis();millis()-t<60;) { service();if(fronts) sweepPing(fronts); }
+    stopMotors();
+    return !runStop;
+  }
+  bool pulse(int8_t x,int8_t y,int8_t w,uint8_t pwm,uint16_t ms) override {
+    if(!startPulse(x,y,w,pwm,100)) return false;
+    if(!runFor(ms)||!softStop()) return false;
+    return wait(250);   // settle (the gyro FIFO is drained meanwhile)
+  }
+  // Smooth sweep (Runner::squareHere): one continuous rotation with the front pinged every >= 25 ms.
+  // The gyro is not read while turning; after the stop its FIFO (yaw only, 2.5 s) is drained sample by
+  // sample and each ping gets the heading of the sample at its time.
+  uint32_t swT0=0,swLastPing=0;uint8_t swMax=0;
+  void sweepPing(int16_t* fronts) {
+    if(swN>=swMax||millis()-swLastPing<25) return;
+    uint32_t a=millis();int16_t f=range(2);uint32_t b=millis();
+    swAt[swN]=uint16_t((a+b)/2-swT0);fronts[swN++]=f;swLastPing=b;
+  }
+  bool sweep(int8_t dir,uint8_t pwm,uint16_t ms,float* yaws,int16_t* fronts,uint8_t maxN,uint8_t* n) override {
+    *n=0;
+    if(!gyroRunning||!biasValid) return false;
+    uint16_t lost0=overflows+gyroRestarts+gyroResets;
+    gyroDrain(0,0);   // empty the FIFO: every later sample belongs to this sweep
+    swT0=millis();swLastPing=0;swN=0;swMax=maxN<96?maxN:96;
+    if(!startPulse(0,0,dir*100,pwm,100)) return false;
+    if(!runFor(ms,fronts)||!softStop(fronts)) return false;
+    swSpan=millis()-swT0;swYaw=yaws;swNext=0;
+    gyroDrain(0,0,swTrace);
+    while(swNext<swN) yaws[swNext++]=yawDeg();
+    *n=swN;
+    if(overflows+gyroRestarts+gyroResets!=lost0) return false;
+    return wait(250);
   }
   // Continuous forward drive (Runner::driveForward): no sample() while driving (it blocks ~180 ms, blind at
-  // 20 cm/s), only the commands/watchdog and a ping of the front sensor every >= 25 ms.
-  uint32_t lastPollMs=0;
-  bool driveStart(int8_t x,int8_t y,int8_t w,uint8_t pwm) override {
-    if(!startPulse(x,y,w,pwm,1500)) return false;
-    lastPollMs=millis();return !runStop;
+  // 20 cm/s), only the commands/watchdog and one ultrasonic ping per poll, >= 25 ms after the previous
+  // ping ended (sample() leaves 15 ms against crosstalk): the front on every other poll, the other four
+  // in turn between, ordered so neighbouring beams never follow each other.
+  uint32_t lastPollMs=0;uint8_t pollCount=0,pollFocus=0;
+  bool driveStart(int8_t x,int8_t y,int8_t w,uint8_t pwm,uint8_t focus) override {
+    pollFocus=focus;
+    if(!startPulse(x,y,w,pwm,100)) return false;
+    motorDeadline=millis()+400;    // renewed by every poll: the motors stop if the run stops polling
+    lastPollMs=millis();pollCount=0;return !runStop;
   }
   bool driveSet(int8_t x,int8_t y,int8_t w,uint8_t pwm) override { return applyMix(x,y,w,pwm); }
-  bool drivePoll(int16_t* front,float* dt) override {
+  bool drivePoll(int16_t us[rl::NUS],float* dt) override {
+    static const uint8_t OTHERS[4]={rl::LSIDE,rl::R45,rl::RSIDE,rl::L45};
     while(millis()-lastPollMs<25) { service();if(runStop) { stopMotors();return false; } }
     service();
-    int16_t f=range(2);   // front
+    static const uint8_t SIDES[5]={rl::LSIDE,rl::RSIDE,rl::LSIDE,rl::RSIDE,rl::FRONT};   // strafes
+    uint8_t k=pollFocus==rl::FOCUS_SIDES?SIDES[pollCount%5]:(pollCount&1)?OTHERS[(pollCount>>1)&3]:rl::FRONT;++pollCount;
+    for(uint8_t i=0;i<rl::NUS;++i) us[i]=rl::NOT_PINGED;
+    us[k]=range(k);   // ultrasonic_mm order: trig/echo index = rl index
     uint32_t now=millis();*dt=(now-lastPollMs)/1000.0f;lastPollMs=now;
-    *front=f;
+    if(motorsLive) motorDeadline=now+400;
     if(runStop) { stopMotors();return false; }
-    return motorsLive;   // false: the 1.5 s motor deadline passed (the run caps a drive at 0.8 s)
+    return motorsLive;   // false: the motors were stopped (deadline missed or STOP)
   }
   // TB6612 short brake (IN1 = IN2 = HIGH) for ~120 ms, then all off: with the outputs just released the
   // robot rolled ~20 cm from 380 mm/s (2 Nov); braking brings that to a few cm.

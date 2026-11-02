@@ -3,7 +3,7 @@
 Sends the wheel map, the six checkpoint captures and the colour references through the probe
 console (tools/start_console.sh, USB or Bluetooth), then CALSAVE, and checks the robot's CALSHOW
 reply against what was sent. Start-facing side readings (no field wall there) are dropped, as in
-tools/seek_steps.py.
+tools/seek_steps.py. P is sent with no targets: the run no longer uses it.
 Run: python3 tools/upload_calibration.py calibration/field-2026-10-30.json
 """
 import json
@@ -15,7 +15,8 @@ BASE = "http://127.0.0.1:8766"
 POSES = ("p_point", "centre", "turned_left", "left_box", "turned_right", "right_box")   # CAL 0..5
 REF_KEYS = ("front", "side_left", "side_right", "left", "right")                        # REF order
 DROP = {"turned_left": ("side_left",), "left_box": ("side_left",),
-        "turned_right": ("side_right",), "right_box": ("side_right",)}
+        "turned_right": ("side_right",), "right_box": ("side_right",),
+        "p_point": REF_KEYS}   # P deleted (2 Nov): the run goes straight to N; its slot is sent empty
 WMAP = "WMAP 1 1 2 -1 3 1 4 -1"   # FL FR RL RR (console Motors panel, 30 Oct)
 GREEN_MILLI, RED_MILLI = 830, 1660
 
@@ -48,7 +49,7 @@ def main():
     _, seq = send(WMAP, "wmap", seq)
     sent = []
     for i, pose in enumerate(POSES):
-        ref = dict(targets[pose]["ref"])
+        ref = dict(targets[pose]["ref"]) if pose in targets else {k: 9999 for k in REF_KEYS}
         for k in DROP.get(pose, ()):
             ref[k] = 9999
         values = [ref[k] for k in REF_KEYS]
