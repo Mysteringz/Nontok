@@ -22,6 +22,9 @@ static const uint8_t CREEP_FLOOR = 41;   // PWM: creep speed at the target, rais
 static const int16_t SIDE_WINDOW = 250; // a side reading this far off its target is another surface
 static const uint8_t DRIVE_PWM = 45;    // creep top speed; 2 Nov field: 52 twice too fast, 47 a tiny bit too fast
 static const uint8_t SIDE_PWM = 68;     // continuous strafes; 2 Nov field: 80 was twice too fast
+// Sensor sets: N uses all five; after a right turn (and its box) front, front-left (L45) and left side;
+// after a left turn front, front-right (R45) and right side.
+enum { SET_ALL = 0, SET_RIGHT_TURN = 1, SET_LEFT_TURN = 2 };
 static const int16_t BLOCK_MM = 20;     // 2 cm rule: no move toward a sensor reading this or less
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -47,6 +50,8 @@ Runner::Runner(Io& io_, const Calib& cal_)
   beamSlope[0] = beamSlope[1] = beamSlope[2] = 0;
   blocked = 0;
   cornered = false;
+  skewMode = 0;
+  rN = 0;
   stopTauY = 0.08f;
   cornerMm = 100;  // mm: forward drives stop if a 45 deg beam reads less (corner closing on a wall)
   fixRate0[0] = 0.15f; fixRate0[1] = 0.08f; fixRate0[2] = 0.03f;   // mm/ms, mm/ms, deg/ms at FIX_PWM (learned)
@@ -201,6 +206,8 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
   int16_t lastFront = us[FRONT];
   float dDecision = d0, vDecision = 0;
   snapped = false;
+  rN = rF = rL = rFF = rFL = 0;
+  rFmin = 1e6f; rFmax = -1e6f;
   for (;;) {
     int16_t z[NUS];
     float dt;
@@ -227,6 +234,19 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
         fabsf(kf[LSIDE].dist() + kf[RSIDE].dist() - snapSum) < 120) {
       for (uint8_t k = 0; k < NUS; ++k) snap[k] = live[k] ? i16(kf[k].dist()) : -1;
       snapped = true;
+    }
+    // heading fit: each accepted front echo against the side offset of that moment (filtered sides)
+    if (skewMode && z[FRONT] > 0 && blind[FRONT] == 0) {
+      uint8_t set = skewMode - 1;
+      bool l = set != SET_LEFT_TURN && live[LSIDE] && blind[LSIDE] < 2, r = set != SET_RIGHT_TURN && live[RSIDE] && blind[RSIDE] < 2;
+      if (set == SET_ALL) { if (!(l && r) || fabsf(kf[LSIDE].dist() + kf[RSIDE].dist() - (cal.ref[N][LSIDE] + cal.ref[N][RSIDE])) > 120) l = r = false; }
+      if (l || r) {
+        float lat = l && r ? (kf[LSIDE].dist() - kf[RSIDE].dist()) / 2 : l ? kf[LSIDE].dist() : -kf[RSIDE].dist();
+        float f = kf[FRONT].dist();
+        rN += 1; rF += f; rL += lat; rFF += f * f; rFL += f * lat;
+        if (f < rFmin) rFmin = f;
+        if (f > rFmax) rFmax = f;
+      }
     }
     // Creep: speed falls with the distance left (full pwmMax 250 mm out, floorPwm at the target), so
     // the robot slows smoothly into the stop. Not moving at all over 400 ms raises only the floor, by 4.
@@ -998,7 +1018,6 @@ bool Runner::creepTest(int16_t target) {
 // ---- Position correction (2 Nov field plan) -------------------------------------------------
 // Sensor sets: N uses all five; after a right turn (and its box) front, front-left (L45) and left
 // side; after a left turn front, front-right (R45) and right side.
-enum { SET_ALL = 0, SET_RIGHT_TURN = 1, SET_LEFT_TURN = 2 };
 static const uint8_t FIX_PWM = 68;   // combined moves (strafe needs about this much)
 static const float FIX_DEAD = 70;    // ms of soft start before a move really moves
 
@@ -1233,6 +1252,7 @@ bool Runner::walkTo(int16_t target, int16_t us[NUS]) {
   for (uint8_t move = 0; move < 12; ++move) {
     if (us[FRONT] <= 0) { TRY(measure(us)); if (us[FRONT] <= 0) return true; continue; }
     if (us[FRONT] - target <= 15) return true;
+    if (us[FRONT] > 1500) { io.event(RL_F("no_wall_ahead"), us[FRONT]); return true; }   // the field is 1.5 m wide
     TRY(driveForward(target, CREEP_MAX_MS, DRIVE_PWM, us));
     if (cornered) return true;   // stopped at a wall: never creep on toward it (2 Nov: 12 restarts, 45 deg at 47 mm)
     if (us[FRONT] > 150) TRY(hold(us));
@@ -1302,6 +1322,34 @@ static bool beam(const int16_t* ref, uint8_t set, const int16_t* us, float* v, f
   return true;
 }
 
+// Heading from the last driveForward's fit: side offset against front reading over >= 6 front echoes
+// spanning >= 50 mm; the slope is tan(heading) (see skewFrom; a fit over the whole drive instead of two
+// readings, so the side walls' +-15 mm noise averages out).
+bool Runner::driveSkew(float* deg) const {
+  if (rN < 6 || rFmax - rFmin < 50) return false;
+  float den = rN * rFF - rF * rF;
+  if (den <= 0) return false;
+  float slope = (rN * rFL - rF * rL) / den;
+  if (fabsf(slope) > 0.7f) return false;
+  *deg = atanf(slope) * 57.29578f;
+  return true;
+}
+
+// After the colour turn the front must see the side wall at about the turned capture's reading; no echo
+// or far off (2 Nov: 2.3 m, the robot then crept out of the field): turn 10 deg toward the 45 deg beam
+// with the nearer echo, at most 3 times, before any creep.
+bool Runner::faceExpected(int16_t want, int16_t us[NUS]) {
+  for (uint8_t i = 0; i < 3 && (us[FRONT] <= 0 || fabsf(float(us[FRONT] - want)) > 250); ++i) {
+    int8_t dir = us[L45] > 0 && (us[R45] <= 0 || us[L45] < us[R45]) ? 1 : us[R45] > 0 ? -1 : 0;
+    if (!dir) break;
+    io.event(RL_F("face_expected"), us[FRONT], want, dir);
+    setGoal(goal + 10 * dir);
+    TRY(rotateTo(goal, ROT_TOL, false));
+    TRY(measure(us));
+  }
+  return true;
+}
+
 // Placed pointing roughly at the main wall: if the front beam has no echo but a 45 deg beam does, turn
 // 15 deg toward that beam (at most 3 times) so the creep heads for the wall.
 bool Runner::faceWall(int16_t us[NUS]) {
@@ -1318,10 +1366,15 @@ bool Runner::faceWall(int16_t us[NUS]) {
 
 // Turn out the heading measured over the straight move from readings a to us (skewFrom); the gyro then
 // holds the squared heading. Without a usable side wall the heading is kept.
-bool Runner::straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS]) {
+bool Runner::straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS], bool* known) {
   float th, y;
-  if (!skewFrom(set, a, us, &th)) { io.event(RL_F("skew_unknown"), a[FRONT], us[FRONT]); return true; }
+  if (known) *known = false;
+  bool fit = driveSkew(&th);
+  rN = 0;   // used once
+  if (!fit && !skewFrom(set, a, us, &th)) { io.event(RL_F("skew_unknown"), a[FRONT], us[FRONT]); return true; }
   if (!io.yaw(&y)) return true;
+  if (known) *known = true;
+  io.event(RL_F("skew_src"), fit ? 1 : 0);
   th = clampf(th, -35, 35);
   io.event(RL_F("skew"), i16(th * 10), us[FRONT] - a[FRONT]);
   if (fabsf(th) <= 1.5f) { setGoal(y); return true; }
@@ -1562,12 +1615,31 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     memcpy(a, us, sizeof(a));
     if (us[FRONT] > 0 && fabsf(float(us[FRONT] - n[FRONT])) > 15) {
       snapSum = n[LSIDE] + n[RSIDE];
+      skewMode = 1 + SET_ALL;
       TRY(driveForward(n[FRONT], CREEP_MAX_MS, DRIVE_PWM, us));        // 2: straight on to N's distance
+      skewMode = 0;
       snapSum = 0;
       if (snapped) memcpy(a, snap, sizeof(a));
     }
-    TRY(straighten(SET_ALL, a, us));                                   //    heading from the side walls
+    bool known;
+    TRY(straighten(SET_ALL, a, us, &known));                           //    heading from the side walls
     TRY(align(N, SET_ALL, 95, 15, 8, 6, us));                          //    combined moves onto N
+    // Never turn at N on an unknown heading (2 Nov: the start's crookedness carried into the turn and the
+    // robot left the field): straight back 120 mm and forward again, the side walls fitted over each.
+    for (uint8_t tryN = 0; tryN < 2 && !known && us[FRONT] > 0; ++tryN) {
+      io.event(RL_F("heading_move"), tryN);
+      skewMode = 1 + SET_ALL;
+      memcpy(a, us, sizeof(a));
+      TRY(driveForward(us[FRONT] + 120, DRIVE_MAX_MS, DRIVE_PWM, us));
+      TRY(straighten(SET_ALL, a, us, &known));
+      if (!known && us[FRONT] > 0) {
+        memcpy(a, us, sizeof(a));
+        TRY(driveForward(n[FRONT], DRIVE_MAX_MS, DRIVE_PWM, us));
+        TRY(straighten(SET_ALL, a, us, &known));
+      }
+      skewMode = 0;
+      TRY(align(N, SET_ALL, 95, 15, 8, 6, us));
+    }
   }
   turnDir = forceTurn;
   if (first <= 3 && last >= 3) {
@@ -1588,8 +1660,12 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     uint8_t set = turnDir > 0 ? SET_LEFT_TURN : SET_RIGHT_TURN;
     beamSlope[set] = 0;   // learned afresh from the box approach's own turn
     TRY(measure(us));
+    const int16_t* tr = cal.ref[turnDir > 0 ? N_LEFT : N_RIGHT];
+    if (tr[FRONT] != NONE) TRY(faceExpected(tr[FRONT], us));           //    the front must see the side wall
     memcpy(a, us, sizeof(a));
+    skewMode = 1 + set;
     TRY(walkTo(cal.ref[box][FRONT] + 150, us));                       // 5: straight, slowly
+    skewMode = 0;
     if (cornered) TRY(recover(set, us));                               //    stopped at a wall: back off, re-localize
     else TRY(straighten(set, a, us));                                  //    heading from the main wall
     TRY(align(box, set, 98, 4, 4, 8, us));                             // 6: into the box

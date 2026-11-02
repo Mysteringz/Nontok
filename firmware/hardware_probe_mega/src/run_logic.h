@@ -191,9 +191,15 @@ class Runner {
   bool faceWall(int16_t us[NUS]);
   bool driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[NUS]);
   bool align(Pose pose, uint8_t set, float target, float deadX, float deadY, uint8_t maxMoves, int16_t us[NUS]);
-  bool straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS]);
+  bool straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS], bool* known = 0);
+  bool faceExpected(int16_t want, int16_t us[NUS]);
   bool squareByMove(uint8_t set, float dist, int16_t us[NUS]);
   int16_t snapSum;     // driveForward: side-wall spacing (L + R) to snapshot at, 0 = off
+  // driveForward heading fit (skewMode 1 + SET: on): the side offset against the front reading over
+  // every front echo of the drive, least squares; see driveSkew
+  uint8_t skewMode;
+  float rN, rF, rL, rFF, rFL, rFmin, rFmax;
+  bool driveSkew(float* deg) const;
   bool snapped;        // driveForward saw both side walls at that spacing: snap holds front / sides then
   int16_t snap[NUS];
   float beamSlope[3];
