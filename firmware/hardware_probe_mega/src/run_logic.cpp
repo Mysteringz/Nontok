@@ -26,6 +26,12 @@ static const uint8_t SIDE_PWM = 68;     // continuous strafes; 2 Nov field: 80 w
 // after a left turn front, front-right (R45) and right side.
 enum { SET_ALL = 0, SET_RIGHT_TURN = 1, SET_LEFT_TURN = 2 };
 static const int16_t BLOCK_MM = 20;
+#ifdef TEAM_PARK   // the team's parking stage (373ff50) unchanged, for comparison
+static const bool PARK_ORIG = true;
+#else
+static const bool PARK_ORIG = false;
+#endif
+static const float CORNER_MARGIN = 25;   // mm: a 45 deg echo must be this much shorter than the front's to be a corner
 static const float CORNER_ZONE = 450;  // mm of front reading: the 10 cm corner stop applies only closer in     // 2 cm rule: no move toward a sensor reading this or less
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -53,6 +59,7 @@ Runner::Runner(Io& io_, const Calib& cal_)
   tpd = 0;
   coast = 0;
   cornered = false;
+  inPark = false;
   skewMode = 0;
   rN = 0;
   stopTauY = 0.08f;
@@ -64,6 +71,14 @@ Runner::Runner(Io& io_, const Calib& cal_)
 bool Runner::measure(int16_t us[NUS], float* rg) {
   float dummy;
   if (!io.measure(us, rg ? rg : &dummy)) return fail(RL_F("stopped"));
+  // One stray echo among the 3 scans voids a sensor's reading (~7 % of measurements). The front steers
+  // every stage (3 Nov sim: a void front skipped the creep into the box, 185 mm short): scan once more and
+  // fill in whatever came back void.
+  if (us[FRONT] <= 0) {
+    int16_t again[NUS];
+    if (!io.measure(again, &dummy)) return fail(RL_F("stopped"));
+    for (uint8_t k = 0; k < NUS; ++k) if (us[k] <= 0) us[k] = again[k];
+  }
   noteWalls(us);
   return true;
 }
@@ -191,10 +206,12 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
   Kalman1D kf[NUS];
   bool live[NUS];      // filter started: from the stopped reading, or the first echo while driving
   uint8_t blind[NUS];  // pings in a row without an accepted echo
+  uint8_t okc[NUS];    // echoes accepted since the filter started: the heading fit trusts it from 2 on
   for (uint8_t k = 0; k < NUS; ++k) {
     live[k] = us[k] > 0;
     if (live[k]) kf[k].init(float(us[k]));
     blind[k] = 0;
+    okc[k] = 0;
   }
   float d0 = float(us[FRONT]), t = 0;
   const int8_t s = d0 > stopAt ? 1 : -1;   // +1 forward (front shrinks), -1 backward
@@ -203,10 +220,15 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
   bool hasBefore = io.yaw(&before);
   cornered = false;
   if (towardWall(s * 100, 0)) { io.event(RL_F("wall_block"), s * 100, 0, blocked); cornered = true; return true; }
-  if (!io.driveStart(s * 100, 0, w, pwm, FOCUS_FRONT)) return fail(RL_F("stopped"));
+  // a heading-fit drive pings the side walls it fits ~3x as often (main.cpp schedules): 3 Nov sim, at 4 Hz the
+  // side fit over the last 19 cm into the box was off by up to 3 deg and turned the robot the wrong way
+  const uint8_t focus = PARK_ORIG && inPark ? FOCUS_FRONT : skewMode == 1 + SET_ALL ? FOCUS_ALL : skewMode == 1 + SET_RIGHT_TURN ? FOCUS_LEFT
+                      : skewMode == 1 + SET_LEFT_TURN ? FOCUS_RIGHT : FOCUS_FRONT;
+  if (!io.driveStart(s * 100, 0, w, pwm, focus)) return fail(RL_F("stopped"));
   uint16_t polls = 0;
   float tWin = 0, dWin = d0;
   int16_t lastFront = us[FRONT];
+  int16_t raw45[2] = {us[L45], us[R45]};   // last raw echoes: a corner stop needs one really close
   float dDecision = d0, vDecision = 0;
   snapped = false;
   rN = rF = rL = rFF = rFL = 0;
@@ -224,12 +246,14 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
       if (z[k] > 0) {
         // A side or 45 deg sensor rejected 3 pings running is seeing a different surface (a wall
         // ended, or the first echo was spurious): restart its filter there. The front never restarts.
-        if (!live[k] || (k != FRONT && blind[k] >= 3)) { kf[k].init(float(z[k])); live[k] = true; blind[k] = 0; }
-        else if (kf[k].update(float(z[k]))) blind[k] = 0;
+        if (!live[k] || (k != FRONT && blind[k] >= 3)) { kf[k].init(float(z[k])); live[k] = true; blind[k] = 0; okc[k] = 0; }
+        else if (kf[k].update(float(z[k]))) { blind[k] = 0; if (okc[k] < 255) ++okc[k]; }
         else ++blind[k];   // rejected as spurious: counts like a missing echo
       } else ++blind[k];
     }
     if (z[FRONT] != NOT_PINGED) lastFront = z[FRONT];
+    if (z[L45] != NOT_PINGED) raw45[0] = z[L45];
+    if (z[R45] != NOT_PINGED) raw45[1] = z[R45];
     float d = kf[FRONT].dist(), v = kf[FRONT].speed();
     // First moment both side walls are tracked at the capture's spacing: snapshot for skewFrom (the
     // heading over the rest of this straight drive)
@@ -241,7 +265,10 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
     // heading fit: each accepted front echo against the side offset of that moment (filtered sides)
     if (skewMode && z[FRONT] > 0 && blind[FRONT] == 0) {
       uint8_t set = skewMode - 1;
-      bool l = set != SET_LEFT_TURN && live[LSIDE] && blind[LSIDE] < 2, r = set != SET_RIGHT_TURN && live[RSIDE] && blind[RSIDE] < 2;
+      // a side filter seeded by a stray reading (3 Nov sim: 1458 mm with the wall at 215) is only trusted once
+      // two echoes have confirmed it: one such sample made the fit read +8 deg on a robot 2 deg off
+      bool l = set != SET_LEFT_TURN && live[LSIDE] && blind[LSIDE] < 2 && okc[LSIDE] >= 2,
+           r = set != SET_RIGHT_TURN && live[RSIDE] && blind[RSIDE] < 2 && okc[RSIDE] >= 2;
       if (set == SET_ALL) { if (!(l && r) || fabsf(kf[LSIDE].dist() + kf[RSIDE].dist() - (cal.ref[N][LSIDE] + cal.ref[N][RSIDE])) > 120) l = r = false; }
       if (l || r) {
         float lat = l && r ? (kf[LSIDE].dist() - kf[RSIDE].dist()) / 2 : l ? kf[LSIDE].dist() : -kf[RSIDE].dist();
@@ -283,7 +310,14 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
     // more than CORNER_ZONE out, a close 45 deg echo is something on the open floor, not a wall (2 Nov: a
     // ~70 mm echo at the start stopped every drive and the robot backed away all run).
     bool nearWall = !live[FRONT] || kf[FRONT].dist() < CORNER_ZONE;
-    if (s > 0 && (nearWall && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm)))) {
+    // A 45 deg echo about as far as the front's is the wall straight ahead seen by the beam's edge (3 Nov
+    // sim, and the field's right box: the creep stopped ~45 mm short), not a corner: the front guards that.
+    float cornerCap = live[FRONT] && !(PARK_ORIG && inPark) ? kf[FRONT].dist() - CORNER_MARGIN : 1e6f;   // the filter carries over a missed echo or two
+    const int16_t rawCap = PARK_ORIG && inPark ? 32000 : int16_t(cornerMm + 30);
+    // ... and only on a real close echo (3 Nov sim: a beam jumping between surfaces gave the filter a
+    // speed that predicted 97 mm with every echo 400+ mm)
+    if (s > 0 && (nearWall && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm && kf[L45].dist() < cornerCap && (raw45[0] > 0 || rawCap == 32000) && raw45[0] < rawCap) ||
+                               (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm && kf[R45].dist() < cornerCap && (raw45[1] > 0 || rawCap == 32000) && raw45[1] < rawCap)))) {
       io.event(RL_F("corner_stop"), i16(kf[L45].dist()), i16(kf[R45].dist()));
       cornered = true;
       break;
@@ -1290,6 +1324,8 @@ bool Runner::walkTo(int16_t target, int16_t us[NUS]) {
 }
 
 // ---- 2 Nov game plan: creep, straight back to N, combined omnidirectional moves ----------------
+static const float PARK_DEAD_Y = 10;    // mm along the side wall left in the box (3 Nov sim: 5 / 8 mm strafed +6 -20 +10, +15 -9 +10 -6; 10 beats the team on every park metric)
+static const float HEADING_MOVE = 110;   // mm toward the main wall from N and back: inside the side walls
 static const int16_t APPROACH_MM = 500;   // stage 1: creep until the front reads ~50 cm (2 Nov field: 20 cm hit the wall)
 static const float STRAFE_EFF = 0.6f;     // sideways mm per forward mm at the same wheel power (rollers slip)
 static const float MOVE_MAX_MS = 2400;    // one combined move stays inside the gyro FIFO (yaw only: 2.5 s)
@@ -1435,7 +1471,7 @@ bool Runner::squareByMove(uint8_t set, float dist, int16_t us[NUS]) {
 // After a wall stop (10 cm corner stop or 2 cm rule): localize again instead of going on blind. Back
 // off 80 mm straight (the one direction with no wall), the side wall(s) of the set giving the heading
 // over that move (skewFrom), turned out; the caller then goes on to its target from the fresh readings.
-bool Runner::recover(uint8_t set, int16_t us[NUS]) {
+bool Runner::recover(uint8_t set, int16_t us[NUS], float maxTurn) {
   cornered = false;
   io.event(RL_F("recover"), us[FRONT], us[L45], us[R45]);
   if (us[FRONT] <= 0) {   // no front echo to track a drive: one timed reverse
@@ -1446,7 +1482,7 @@ bool Runner::recover(uint8_t set, int16_t us[NUS]) {
   memcpy(a, us, sizeof(a));
   TRY(driveForward(us[FRONT] + 80, DRIVE_MAX_MS, DRIVE_PWM, us));
   cornered = false;
-  return straighten(set, a, us);
+  return straighten(set, a, us, 0, maxTurn);
 }
 
 // One continuous omnidirectional move onto a calibrated pose: forward and sideways at the same time,
@@ -1542,7 +1578,9 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[
     if (polls % 8 == 1) io.event(RL_F("mpoll"), i16(t), i16(ex), i16(ey), pwm);
     if (doneX && doneY) break;
     bool nearWall = !live[FRONT] || kf[FRONT].dist() < CORNER_ZONE;   // see driveForward
-    if (mx > 0 && ((nearWall && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm))) ||
+    float cornerCap = live[FRONT] && !(PARK_ORIG && inPark) ? kf[FRONT].dist() - CORNER_MARGIN : 1e6f;   // the filter carries over a missed echo or two
+    if (mx > 0 && ((nearWall && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm && kf[L45].dist() < cornerCap) ||
+                                 (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm && kf[R45].dist() < cornerCap))) ||
                    (z[FRONT] > 0 && z[FRONT] < 40) ||   // the filtered front: a single short echo is not a wall (2 Nov at N)
                    (d[FRONT] > 0 && d[FRONT] < (ref[FRONT] != NONE && ref[FRONT] - 15 > 40 ? ref[FRONT] - 15 : 40)))) {
       io.event(RL_F("corner_stop"), i16(kf[L45].dist()), i16(kf[R45].dist()));
@@ -1684,7 +1722,7 @@ bool Runner::parkIn(Pose box, uint8_t set, int16_t us[NUS]) {
     toF(us, d);
     posErr(ref, set, d, &ex, &hx, &ey, &hy);
     io.event(RL_F("park_line"), i, hy ? i16(ey) : NONE, us[FRONT]);
-    if (!hy || fabsf(ey) <= 5) break;
+    if (!hy || fabsf(ey) <= (PARK_ORIG ? 5 : PARK_DEAD_Y)) break;   // 3 Nov sim: at 5 mm a 6 mm error strafed +6 -20 +10 (overshoot)
     TRY(driveSide(box, 0.9f, us, &used));
     if (!used) break;
     TRY(hold(us));
@@ -1695,7 +1733,8 @@ bool Runner::parkIn(Pose box, uint8_t set, int16_t us[NUS]) {
     skewMode = 1 + set;
     TRY(driveForward(ref[FRONT], CREEP_MAX_MS, DRIVE_PWM, us));
     skewMode = 0;
-    if (cornered) TRY(recover(set, us));
+    // at the wall an 80 mm back-off is too short for a big heading fix (3 Nov sim: a noisy 9.5 deg parked 6 deg off)
+    if (cornered) TRY(recover(set, us, PARK_ORIG ? 35 : 5));
     else TRY(straighten(set, a, us, 0, 3));
   }
   for (uint8_t i = 0; i < 4; ++i) {                                   // 3
@@ -1703,12 +1742,94 @@ bool Runner::parkIn(Pose box, uint8_t set, int16_t us[NUS]) {
     toF(us, d);
     posErr(ref, set, d, &ex, &hx, &ey, &hy);
     io.event(RL_F("park_fix"), i, hx ? i16(ex) : NONE, hy ? i16(ey) : NONE);
-    bool fixX = hx && fabsf(ex) > 5, fixY = hy && fabsf(ey) > 8;
+    bool fixX = hx && fabsf(ex) > 5, fixY = hy && fabsf(ey) > (PARK_ORIG ? 8 : PARK_DEAD_Y);
     if (!fixX && !fixY) break;
     if (fixX) TRY(driveForward(ref[FRONT], DRIVE_MAX_MS, DRIVE_PWM, us));
     else TRY(driveSide(box, 0.8f, us, &used));
     TRY(hold(us));
   }
+  return true;
+}
+
+// Steep starts (3 Nov field, IMG_3994: placed on the arc ~40 deg out, pointing at N, the creep to a 50 cm
+// front reading overshot N along the slanted beam and the run ended crooked at the right wall). The robot
+// is placed pointing at N, so N lies straight ahead; only the angle to the main wall is unknown.
+//  1 the front at the start heading (f0), then one 12 deg probe turn (gyro) toward the wall's normal
+//    (the reading falls); if it grows, that was away from it: probe 12 deg the other side instead
+//  2 the two readings fix the angle: a flat wall reads (perpendicular distance) / cos(angle off the
+//    normal - the beam's half-width), the front sitting FRONT_FWD ahead of the turning centre
+//  3 back to the start heading and one straight creep at it (heading held between <= 2 s legs, the
+//    gyro FIFO) until the front reads f0 x (N's distance / the start's), both measured along the same
+//    slanted beam: the ratio holds whatever the beam width, so the creep stops on N's line
+//  4 turn square to the wall (the start heading + the angle); step 2 then settles onto N as before
+// A small angle (no clear slope) or anything unexpected: *done = false, the start is left as it was.
+static const float START_PROBE = 12;     // deg
+static const float START_CONE = 11;      // deg: nominal beam half-width for the angle (its error only offsets
+                                         // the final turn; step 2 squares on the side walls)
+static const float START_MIN_DEG = 12;   // below this the usual creep copes (sim: starts up to ~30 deg)
+static const float START_LEG_MS = 2300;  // one leg of the walk: + soft start and brake stays inside the gyro FIFO (2.5 s)
+static const uint8_t START_PWM = 52;    // walk top speed on the open floor; the creep profile slows it to 41 over the last 25 cm
+static float startModel(float alpha, float dc, float b) {   // front reading at b deg off the normal
+  float off = b - START_CONE;
+  return (dc - FRONT_FWD * cosf(b * DEG)) / cosf((off > 0 ? off : 0) * DEG);
+}
+bool Runner::aimStart(int16_t us[NUS], bool* done) {
+  *done = false;
+  float y0, y;
+  for (uint8_t t = 0; t < 3 && us[FRONT] <= 0; ++t) TRY(measure(us));   // a lost echo: measure again
+  if (us[FRONT] <= 0 || !io.yaw(&y0)) return true;
+  const float f0 = us[FRONT];
+  int8_t dir = 0;
+  float f1 = 0, delta = 0, fp[2] = {0, 0}, dp[2] = {0, 0};   // probe readings / turned angles, + side and - side
+  for (int8_t s = 1; s >= -1 && !dir; s -= 2) {
+    TRY(rotateTo(y0 + s * START_PROBE, ROT_TOL, false));
+    TRY(measure(us));
+    if (us[FRONT] <= 0) TRY(measure(us));
+    if (!io.yaw(&y)) return true;
+    io.event(RL_F("start_probe"), s, i16(f0), us[FRONT], i16((y - y0) * 10));
+    uint8_t i = s > 0 ? 0 : 1;
+    fp[i] = us[FRONT];
+    dp[i] = fabsf(y - y0);
+    if (us[FRONT] > 0 && us[FRONT] < f0 - 0.02f * f0 && dp[i] > 6) { dir = s; f1 = fp[i]; delta = dp[i]; }
+  }
+  // neither fell 2 % (a wide beam flattens the reading near square): the two sides' difference still shows
+  // where the normal is (3 Nov sim, ~21 deg starts: -19 mm one way, +70 mm the other)
+  if (!dir && fp[0] > 0 && fp[1] > 0 && dp[0] > 6 && dp[1] > 6 && fabsf(fp[0] - fp[1]) > 30) {
+    uint8_t i = fp[0] < fp[1] ? 0 : 1;
+    dir = i ? -1 : 1; f1 = fp[i]; delta = dp[i];
+  }
+  // angle of the start heading off the normal (deg), the centre's distance from the wall
+  float bestA = 0, bestE = 1e9f, dc = 0;
+  if (dir) for (float a = delta + 1; a <= 80; a += 0.25f) {
+    float off = a - START_CONE;
+    float d = f0 * cosf((off > 0 ? off : 0) * DEG) + FRONT_FWD * cosf(a * DEG);
+    float e = fabsf(startModel(a, d, a - delta) - f1);
+    if (e < bestE) { bestE = e; bestA = a; dc = d; }
+  }
+  setGoal(y0);
+  TRY(rotateTo(goal, ROT_TOL, false));
+  TRY(measure(us));
+  for (uint8_t t = 0; t < 2 && us[FRONT] <= 0; ++t) TRY(measure(us));
+  if (us[FRONT] <= 0) us[FRONT] = i16(f0);   // back at the start heading: the start's reading holds
+  io.event(RL_F("start_angle"), dir, i16(bestA * 10), i16(dc), i16(bestE));
+  if (!dir || bestA < START_MIN_DEG || bestE > 25) return true;
+  const int16_t* n = cal.ref[N];
+  float ca = cosf(bestA * DEG), dsNow = dc - FRONT_FWD * ca, dsN = n[FRONT] + FRONT_FWD - FRONT_FWD * ca;
+  if (dsNow < dsN + 100) return true;
+  float target = us[FRONT] * dsN / dsNow;
+  io.event(RL_F("start_walk"), us[FRONT], i16(target), i16(dsNow), i16(dsN));
+  for (uint8_t leg = 0; leg < 12; ++leg) {
+    for (uint8_t t = 0; t < 3 && us[FRONT] <= 0; ++t) TRY(measure(us));   // one stray echo voids a reading
+    if (us[FRONT] <= 0 || us[FRONT] - target <= 15) break;
+    TRY(driveForward(target, START_LEG_MS, START_PWM, us));
+    if (cornered) { TRY(recover(SET_ALL, us)); break; }   // a wall close: back off, then square anyway
+    TRY(hold(us));
+  }
+  setGoal(y0 + dir * bestA);   // square to the main wall
+  TRY(rotateTo(goal, ROT_TOL, false));
+  TRY(measure(us));
+  io.event(RL_F("start_square"), us[FRONT], us[LSIDE], us[RSIDE]);
+  *done = true;
   return true;
 }
 
@@ -1735,40 +1856,36 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
   cornerMm = 100;
   if (first <= 1 && last >= 1) {
     io.event(RL_F("step"), 1);
-    TRY(faceWall(us));
-    TRY(walkTo(APPROACH_MM, us));                                      // 1
+    bool aimed;
+    TRY(aimStart(us, &aimed));                                         // steep start: walk the line to N
+    if (!aimed) TRY(faceWall(us));
+    if (!aimed) TRY(walkTo(APPROACH_MM, us));                          // 1
     if (cornered) TRY(recover(SET_ALL, us));                           //   stopped at a wall: back off, re-localize
   }
   if (first <= 2 && last >= 2) {
     io.event(RL_F("step"), 2);
-    memcpy(a, us, sizeof(a));
-    if (us[FRONT] > 0 && fabsf(float(us[FRONT] - n[FRONT])) > 15) {
-      snapSum = n[LSIDE] + n[RSIDE];
-      skewMode = 1 + SET_ALL;
+    if (us[FRONT] > 0 && fabsf(float(us[FRONT] - n[FRONT])) > 15)
       TRY(driveForward(n[FRONT], CREEP_MAX_MS, DRIVE_PWM, us));        // 2: straight on to N's distance
-      skewMode = 0;
-      snapSum = 0;
-      if (snapped) memcpy(a, snap, sizeof(a));
-    }
-    bool known;
-    TRY(straighten(SET_ALL, a, us, &known));                           //    heading from the side walls
-    TRY(align(N, SET_ALL, 95, 15, 8, 6, us));                          //    combined moves onto N
-    // Never turn at N on an unknown heading (2 Nov: the start's crookedness carried into the turn and the
-    // robot left the field): straight back 120 mm and forward again, the side walls fitted over each.
+    // Heading at N (3 Nov sim): the side walls end ~48 cm from the main wall, so on the drive in they are
+    // seen only over its last few cm and that fit is noise (it turned the robot 6 deg the wrong way); the
+    // old check backed up 12 cm, out of their span. Instead a short straight move toward the main wall and
+    // back, both inside the side walls, each leg's side-wall fit turned out (skewFrom / driveSkew).
+    bool known = false;
     for (uint8_t tryN = 0; tryN < 2 && !known && us[FRONT] > 0; ++tryN) {
       io.event(RL_F("heading_move"), tryN);
+      bool k1 = false, k2 = false;
       skewMode = 1 + SET_ALL;
       memcpy(a, us, sizeof(a));
-      TRY(driveForward(us[FRONT] + 120, DRIVE_MAX_MS, DRIVE_PWM, us));
-      TRY(straighten(SET_ALL, a, us, &known));
-      if (!known && us[FRONT] > 0) {
-        memcpy(a, us, sizeof(a));
-        TRY(driveForward(n[FRONT], DRIVE_MAX_MS, DRIVE_PWM, us));
-        TRY(straighten(SET_ALL, a, us, &known));
-      }
+      TRY(driveForward(n[FRONT] - HEADING_MOVE, DRIVE_MAX_MS, DRIVE_PWM, us));
+      if (!cornered) TRY(straighten(SET_ALL, a, us, &k1, 12));
+      memcpy(a, us, sizeof(a));
+      if (us[FRONT] > 0) TRY(driveForward(n[FRONT], DRIVE_MAX_MS, DRIVE_PWM, us));
+      TRY(straighten(SET_ALL, a, us, &k2, 12));
       skewMode = 0;
-      TRY(align(N, SET_ALL, 95, 15, 8, 6, us));
+      cornered = false;
+      known = k1 || k2;
     }
+    TRY(align(N, SET_ALL, 95, 15, 8, 6, us));                          //    combined moves onto N
   }
   turnDir = forceTurn;
   if (first <= 3 && last >= 3) {
@@ -1789,6 +1906,7 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
   }
   if (first <= 4 && last >= 4) {
     io.event(RL_F("step"), 4);
+    inPark = true;
     if (turnDir == 0) return fail(RL_F("no_turn_direction"));
     Pose box = turnDir > 0 ? BOX_LEFT : BOX_RIGHT;
     uint8_t set = turnDir > 0 ? SET_LEFT_TURN : SET_RIGHT_TURN;

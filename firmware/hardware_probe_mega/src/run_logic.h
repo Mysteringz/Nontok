@@ -200,6 +200,7 @@ class Runner {
   bool align(Pose pose, uint8_t set, float target, float deadX, float deadY, uint8_t maxMoves, int16_t us[NUS]);
   bool straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS], bool* known = 0, float maxTurn = 35);
   bool parkIn(Pose box, uint8_t set, int16_t us[NUS]);
+  bool aimStart(int16_t us[NUS], bool* done);
   bool fitHeading(Pose pose, uint8_t set, int16_t us[NUS]);
   bool faceExpected(int16_t want, int16_t us[NUS]);
   bool squareByMove(uint8_t set, float dist, int16_t us[NUS]);
@@ -216,10 +217,11 @@ class Runner {
   // 2 cm rule (user, 2 Nov): a sensor reading <= BLOCK_MM bars every move toward it (front: forward;
   // a 45 deg beam: forward and sideways to its side; a side: sideways to it) until it reads > 2 x.
   uint8_t blocked;     // bit per sensor
+  bool inPark;         // step 4 (to the box and parking)
   bool cornered;       // the last forward drive ended at a wall (corner stop or 2 cm rule)
   void noteWalls(const int16_t* z);
   bool towardWall(int8_t x, int8_t y) const;
-  bool recover(uint8_t set, int16_t us[NUS]);  // mm of the stage's 45 deg reading per deg CCW, learned from each straighten turn (0 = unknown)
+  bool recover(uint8_t set, int16_t us[NUS], float maxTurn = 35);  // mm of the stage's 45 deg reading per deg CCW, learned from each straighten turn (0 = unknown)
 };
 
 }  // namespace rl
