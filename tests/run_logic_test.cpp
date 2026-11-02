@@ -125,7 +125,7 @@ class Sim : public rl::Io {
     return pulses < 600;
   }
   bool driveEnd() override {
-    const double coast = speed() * 1000 * 0.02;   // mm
+    const double coast = speed() * 1000 * 0.08;   // mm: braked, ~80 ms of travel (rolled ~0.5 s unbraked on the robot)
     p.x += -(drvX * coast) * sin(p.psi);
     p.y += (drvX * coast) * cos(p.psi);
     drvPwm = 0;

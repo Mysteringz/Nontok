@@ -24,7 +24,7 @@ Runner::Runner(Io& io_, const Calib& cal_)
   k[1] = 0.25f;
   memset(wcomp, 0, sizeof(wcomp));
   rate[0] = rate[1] = 0;
-  stopTau = 0.05f;
+  stopTau = 0.15f;   // cautious until learned: 2 Nov the robot rolled ~20 cm after a stop from 380 mm/s
 }
 
 bool Runner::measure(int16_t us[NUS], float* rg) {
@@ -151,15 +151,18 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwmFast, uint8_t pw
     vDecision = v;
     if (++polls % 5 == 1 && polls < 45) io.event(RL_F("dpoll"), i16(t), z, i16(d), i16(v));   // sparse trace
     if (d + v * stopTau <= stopAt + 3) break;   // predicted distance after stopping
+    if (z > 0 && z < stopAt - 10) break;        // a raw echo already inside the target: stop, whatever the filter says
     if (t >= maxMs || blind >= 8) break;
   }
   if (!io.driveEnd()) return fail(RL_F("stopped"));
   int16_t after_us[NUS];
   TRY(measure(after_us));
-  // Learn the stopping time: it moved (decision distance - final reading) after the decision at speed |v|.
-  if (after_us[FRONT] > 0 && t < maxMs && blind < 8 && fabsf(vDecision) > 60) {
+  // Learn the stopping time from every drive, whatever ended it: after the final decision the robot moved
+  // (decision distance - final reading) at about the speed |v| the filter had. (2 Nov: only distance-ended
+  // drives were used, both field drives ended on the time limit and it never learned.)
+  if (after_us[FRONT] > 0 && fabsf(vDecision) > 60) {
     float tauObs = (dDecision - after_us[FRONT]) / fabsf(vDecision);
-    stopTau = clampf(0.5f * stopTau + 0.5f * tauObs, 0.005f, 0.2f);
+    stopTau = clampf(0.5f * stopTau + 0.5f * tauObs, 0.01f, 0.8f);
   }
   io.event(RL_F("drive"), i16(us[FRONT]), after_us[FRONT], i16(stopAt), i16(stopTau * 1000));
   if (hasBefore && io.yaw(&after)) {   // forward drives turn this robot: learn the compensation

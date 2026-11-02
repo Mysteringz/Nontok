@@ -1193,7 +1193,15 @@ class MegaIo : public rl::Io {
     if(runStop) { stopMotors();return false; }
     return motorsLive;   // false: the 1.5 s motor deadline passed (the run caps a drive at 0.8 s)
   }
-  bool driveEnd() override { stopMotors();return wait(350); }
+  // TB6612 short brake (IN1 = IN2 = HIGH) for ~120 ms, then all off: with the outputs just released the
+  // robot rolled ~20 cm from 380 mm/s (2 Nov); braking brings that to a few cm.
+  bool driveEnd() override {
+    if(motorsLive) {
+      for(uint8_t m=0;m<4;++m) { analogWrite(pwm[m],0);digitalWrite(motorIn1[m],HIGH);digitalWrite(motorIn2[m],HIGH);digitalWrite(pwm[m],HIGH); }
+      for(uint32_t t=millis();millis()-t<120;) { wdt_reset();service(); }
+    }
+    stopMotors();return wait(350);
+  }
   bool yaw(float* deg) override {
     if(!gyroRunning||!biasValid) return false;
     *deg=yawDeg();return true;
