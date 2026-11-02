@@ -88,6 +88,7 @@ kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px 
   </span>
   <span class="badge" id="link">connecting…</span>
   <span class="badge" id="age">no data</span>
+  <span class="badge" id="btn" title="Start button on A10 (to GND). Shows PRESSED for 1.5 s after any press, even a short tap">start button: —</span>
   <span class="badge" title="Motors only run during SPIN or while WASD keys are held; the robot stops itself 0.4 s after the last drive command">motors: hold-to-drive, auto-stop</span>
   <form id="mark" class="buttons" style="margin-left:0">
     <input id="mark-text" placeholder="Mark test, e.g. beacon left off" style="font:inherit;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink);min-width:220px">
@@ -445,7 +446,7 @@ $('buf-save').onclick = () => {
   a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 };
 
-let after = 0, lastSample = 0;
+let after = 0, lastSample = 0, lastPress = 0;
 async function poll() {
   try {
     const r = await (await fetch('/api/lines?after=' + after)).json();
@@ -464,6 +465,7 @@ async function poll() {
           prompt(msg + '. Drive disabled. brownout = battery/supply dip under motor load.');
         } else if (latest) linkGap(latest, line);
         sample(line); latest = line; lastSample = Date.now(); showTurnTest(line.turntest);
+        if (line.start_btn) lastPress = Date.now();
       } else { event(line); stEvent(line); }
       if (line.type && line.type.startsWith('turntest')) showTurnTest(null, line);
       if (line.type === 'ready' && $('drive-on').checked) {
@@ -482,6 +484,9 @@ async function poll() {
   }
   $('age').textContent = age == null ? 'no data' : age < 2 ? 'live' : `stale ${age.toFixed(0)} s`;
   $('age').className = 'badge ' + (age != null && age < 2 ? 'ok' : 'bad');
+  const pressed = Date.now() - lastPress < 1500;
+  $('btn').textContent = 'start button: ' + (lastSample ? (pressed ? 'PRESSED' : 'released') : '—');
+  $('btn').className = 'badge ' + (pressed ? 'ok' : '');
   for (const id in charts) draw(id);
   showBuffer();
   setTimeout(poll, 100);  // samples arrive at 5 Hz

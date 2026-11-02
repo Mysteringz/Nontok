@@ -39,7 +39,20 @@ static uint8_t runFirst=1,runLast=4;static int8_t runForceTurn=0;
 static const int AUTORUN_ADDRESS=3964;static const uint8_t AUTORUN_MAGIC=0xA5;
 static const uint16_t AUTORUN_MS=10000;static const uint8_t AUTORUN_LED=13;
 static uint32_t autorunAt=0;static bool autorunPending=false;
+static bool autorunUsbCancels=false;   // power-on countdowns only; a button countdown is deliberate
 static void autorunCancel(const __FlashStringHelper* why);
+// Start button between an analog pin and GND (internal pull-up; the shield's analog row, signal and
+// GND pins of one column; never its 5 V pin). Press: start the 10 s countdown; press during the
+// countdown: cancel; press during a run: stop. Ignored for 1.5 s after boot and until released
+// if it was already held at boot, so a stuck or pre-pressed button cannot start the robot.
+// The button is on A15 (found 2 Nov by watching A8..A15). The sample still reports every pin of A8..A15
+// that reads low (btn_pins, bit 0 = A8 ... bit 7 = A15) for wiring checks, but only A15 starts a run.
+static const uint8_t BTN_FIRST=A8,BTN_COUNT=8,BTN_START_MASK=0x80;
+static uint8_t btnMask() { uint8_t m=0;for(uint8_t i=0;i<BTN_COUNT;++i) if(digitalRead(BTN_FIRST+i)==LOW) m|=uint8_t(1<<i);return m; }
+static bool btnRaw=true,btnStable=true,btnIgnoreUntilRelease=false;static uint32_t btnChangedAt=0;
+// Live state in every sample (start_btn: 1 = pressed now or since the previous sample, so a short
+// tap between two samples still shows): btnSeen is set by buttonService, read once per sample().
+static uint8_t btnSeenMask=0,btnPinsReport=0;static bool btnReport=false;
 // Soft start: outputs step toward their targets by RAMP_STEP every RAMP_MS (0->100 in
 // ~125 ms), limiting the inrush that reset the board with four motors starting at once.
 // Stopping is never ramped.
@@ -427,7 +440,7 @@ static void compactSample(Print& o,const uint16_t* adc,const int16_t* us,const u
   o.print(F(",\"bus_errors\":"));o.print(busErrors);
   o.print(F(",\"i2c_timeouts\":"));o.print(i2cTimeouts);o.print(F(",\"gyro_restarts\":"));o.print(gyroRestarts);
   o.print(F(",\"gyro_resets\":"));o.print(gyroResets);o.print(F(",\"bias_valid\":"));o.print(biasValid);
-  o.print(F("},\"color_rgbc\":"));list(o,rgbc,4);ttReport(o);stepReport(o);o.println('}');
+  o.print(F("},\"color_rgbc\":"));list(o,rgbc,4);o.print(F(",\"start_btn\":"));o.print(btnReport);o.print(F(",\"btn_pins\":"));o.print(btnPinsReport);ttReport(o);stepReport(o);o.println('}');
 }
 // Bluetooth's 9600 baud carries ~960 bytes/s: a full sample (~400 bytes) goes once a second
 // and this ~62-byte line fills the other four of five, so the console still updates at 5 Hz.
@@ -438,6 +451,7 @@ static void fastSample(Print& o,const uint16_t* adc,const int16_t* us,const uint
   for(uint8_t i=0;i<US_COUNT;++i) { o.print(',');o.print(us[i]); }
   o.print(',');o.print(angle[2],1);o.print(',');o.print((lastRaw[2]-bias[2])/core::MPU_GYRO_LSB_PER_DPS,1);
   for(uint8_t i=0;i<4;++i) { o.print(',');o.print(rgbc[i]); }
+  o.print(',');o.print(btnReport);
   o.println();
 }
 // ---- Tournament step tests ----------------------------------------------------------------
@@ -641,6 +655,7 @@ static void sample() {
   if(sampling) return;
   sampling=true;
   uint32_t cycleStart=millis();
+  btnPinsReport=btnSeenMask|btnMask();btnSeenMask=0;btnReport=btnPinsReport!=0;
   if(!motorsLive) inhibitMotors();
   uint16_t value[4]={};
   for(uint8_t i=0;i<4;++i) { analogRead(light[i]);for(uint8_t n=0;n<16;++n) value[i]+=analogRead(light[i]);value[i]=(value[i]+8)/16; }
@@ -670,6 +685,7 @@ static void sample() {
   for(uint8_t i=0;i<4;++i) { if(i) Serial.print(',');Serial.print(value[i]); }
   Serial.print(F("],\"ultrasonic_mm\":"));list(Serial,us,US_COUNT);
   Serial.print(F(",\"gyro\":"));gyroService();readAccel();gyroReport(); // No output mid-line.
+  Serial.print(F(",\"start_btn\":"));Serial.print(btnReport);Serial.print(F(",\"btn_pins\":"));Serial.print(btnPinsReport);
   Serial.print(F(",\"color_out_pin\":32,\"color_rgbc\":["));
   for(uint8_t i=0;i<4;++i) { if(i) Serial.print(',');Serial.print(rgbc[i]); }
   Serial.print(']');
@@ -907,8 +923,29 @@ static void autorunCancel(const __FlashStringHelper* why) {
   autorunPending=false;digitalWrite(AUTORUN_LED,LOW);
   out.print(F("{\"type\":\"autorun_cancelled\",\"by\":\""));out.print(why);out.println(F("\"}"));
 }
+static uint8_t btnPressMask=0;
+static void buttonEvent(const __FlashStringHelper* action) {
+  out.print(F("{\"type\":\"button\",\"action\":\""));out.print(action);out.print(F("\",\"pins\":"));out.print(btnPressMask);
+  out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+}
+static void buttonService() {
+  uint8_t m=btnMask();bool up=(m&BTN_START_MASK)==0;uint32_t now=millis();
+  if(!up) { btnSeenMask|=m;btnPressMask=m; }
+  if(up!=btnRaw) { btnRaw=up;btnChangedAt=now; }
+  if(now-btnChangedAt<40||btnRaw==btnStable) return;   // 40 ms debounce
+  btnStable=btnRaw;
+  if(btnStable) { btnIgnoreUntilRelease=false;return; }   // released
+  if(btnIgnoreUntilRelease||now<1500) return;
+  if(runActive) { stopMotors();runStop=true;buttonEvent(F("stop")); }
+  else if(autorunPending) { autorunPending=false;digitalWrite(AUTORUN_LED,LOW);buttonEvent(F("cancel")); }
+  else if(!calValid) out.println(F("{\"error\":\"BUTTON_NEEDS_CALSAVE\"}"));
+  else {
+    autorunPending=true;autorunUsbCancels=false;autorunAt=now+AUTORUN_MS;
+    buttonEvent(F("start"));
+  }
+}
 static void commands(Stream& in,LineReader& r,bool usb) {
-  if(usb&&in.available()) autorunCancel(F("usb"));
+  if(usb&&autorunUsbCancels&&in.available()) autorunCancel(F("usb"));
   while(in.available()) {
     char c=in.read();
     if(c=='!') { stopMotors();runStop=runActive;r.used=0;r.dropping=true;continue; }
@@ -947,14 +984,18 @@ void setup() {
   scan();
   calLoad();calShow();
   pinMode(AUTORUN_LED,OUTPUT);digitalWrite(AUTORUN_LED,LOW);
+  for(uint8_t i=0;i<BTN_COUNT;++i) pinMode(BTN_FIRST+i,INPUT_PULLUP);
+  btnRaw=btnStable=(btnMask()&BTN_START_MASK)==0;btnIgnoreUntilRelease=!btnStable;btnChangedAt=millis();
+  out.print(F("{\"type\":\"start_button\",\"pin\":\"A15\",\"pressed_at_boot\":"));out.print(!btnStable);out.println('}');
   bool armed=EEPROM.read(AUTORUN_ADDRESS)==AUTORUN_MAGIC;
   out.print(F("{\"type\":\"autorun\",\"armed\":"));out.print(armed);
   if(armed&&lastResetWatchdog) out.print(F(",\"skipped\":\"watchdog_reset\""));
   else if(armed&&!calValid) out.print(F(",\"skipped\":\"no_calibration\""));
-  else if(armed) { autorunPending=true;autorunAt=millis()+AUTORUN_MS;out.print(F(",\"countdown_ms\":"));out.print(AUTORUN_MS); }
+  else if(armed) { autorunPending=true;autorunUsbCancels=true;autorunAt=millis()+AUTORUN_MS;out.print(F(",\"countdown_ms\":"));out.print(AUTORUN_MS); }
   out.println('}');
 }
 static void service() {
+  buttonService();
   commands(Serial,usbReader,true);
   commands(Serial3,btReader,false);
   gyroService();
@@ -1028,7 +1069,13 @@ static void runTournament() {
   gyroQuiet=true;if(!gyroRunning) gyroBegin();   // no I2C while a motor runs
   out.print(F("{\"type\":\"run_start\",\"first\":"));out.print(runFirst);out.print(F(",\"last\":"));out.print(runLast);out.println('}');
   MegaIo io;rl::Runner runner(io,calRam);
-  bool ok=runner.run(runFirst,runLast,runForceTurn);
+  // The gyro zeroes itself once the robot has been still for 2 s; pressing the start button shakes the
+  // robot, so give it up to 10 s more (2 Nov: the run started 1 s before the zero and refused).
+  if(!biasValid) {
+    out.println(F("{\"type\":\"run_wait\",\"for\":\"gyro_zero\",\"note\":\"keep the robot still\"}"));
+    for(uint32_t t=millis();!biasValid&&millis()-t<10000&&io.pump(););
+  }
+  bool ok=runStop?false:runner.run(runFirst,runLast,runForceTurn);
   stopMotors();runActive=false;
   out.print(F("{\"type\":\"run_end\",\"result\":\""));out.print(ok?F("done"):F("stopped"));
   out.print(F("\",\"reason\":\""));

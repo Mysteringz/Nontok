@@ -96,8 +96,8 @@ ULTRASONICS = ("left", "right", "front", "side_left", "side_right")
 
 def fast_sample(text, full):
     """Expand a Bluetooth "F,..." line into a sample, other fields from the last full one."""
-    parts = text.split(",")  # F, ms, adc x4, ultrasonic x n, gyro Z angle and rate, colour x4
-    n = len(parts) - 12
+    parts = text.split(",")  # F, ms, adc x4, ultrasonic x n, gyro Z angle and rate, colour x4, start button
+    n = len(parts) - 13
     if not 1 <= n <= 8:
         return None
     try:
@@ -105,6 +105,7 @@ def fast_sample(text, full):
         us = [int(v) for v in parts[6:6 + n]]
         yaw, rate = float(parts[6 + n]), float(parts[7 + n])
         rgbc = [int(v) for v in parts[8 + n:12 + n]]
+        button = int(parts[12 + n])
     except ValueError:
         return None
     gyro = dict((full or {}).get("gyro") or {})
@@ -112,7 +113,7 @@ def fast_sample(text, full):
     gyro["rate_dps"] = (list(gyro.get("rate_dps") or [None, None]))[:2] + [rate]
     record = {k: v for k, v in (full or {}).items() if k in ("boot", "turntest", "step")}
     record.update({"type": "sample", "link": "bt", "fast": 1, "ms": ms, "adc": adc,
-                   "ultrasonic_mm": us, "gyro": gyro, "color_rgbc": rgbc})
+                   "ultrasonic_mm": us, "gyro": gyro, "color_rgbc": rgbc, "start_btn": button})
     return record
 
 
