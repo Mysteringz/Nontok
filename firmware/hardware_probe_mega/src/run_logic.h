@@ -202,7 +202,8 @@ class Runner {
   uint8_t blocked;     // bit per sensor
   bool cornered;       // the last forward drive ended at a wall (corner stop or 2 cm rule)
   void noteWalls(const int16_t* z);
-  bool towardWall(int8_t x, int8_t y) const;  // mm of the stage's 45 deg reading per deg CCW, learned from each straighten turn (0 = unknown)
+  bool towardWall(int8_t x, int8_t y) const;
+  bool recover(uint8_t set, int16_t us[NUS]);  // mm of the stage's 45 deg reading per deg CCW, learned from each straighten turn (0 = unknown)
 };
 
 }  // namespace rl

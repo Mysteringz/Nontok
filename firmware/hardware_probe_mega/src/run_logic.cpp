@@ -1350,6 +1350,23 @@ bool Runner::squareByMove(uint8_t set, float dist, int16_t us[NUS]) {
   return straighten(set, a, us);
 }
 
+// After a wall stop (10 cm corner stop or 2 cm rule): localize again instead of going on blind. Back
+// off 80 mm straight (the one direction with no wall), the side wall(s) of the set giving the heading
+// over that move (skewFrom), turned out; the caller then goes on to its target from the fresh readings.
+bool Runner::recover(uint8_t set, int16_t us[NUS]) {
+  cornered = false;
+  io.event(RL_F("recover"), us[FRONT], us[L45], us[R45]);
+  if (us[FRONT] <= 0) {   // no front echo to track a drive: one timed reverse
+    TRY(pulse(-100, 0, wcomp[0][0], PWM_X, back.msFor(80)));
+    return measure(us);
+  }
+  int16_t a[NUS];
+  memcpy(a, us, sizeof(a));
+  TRY(driveForward(us[FRONT] + 80, DRIVE_MAX_MS, DRIVE_PWM, us));
+  cornered = false;
+  return straighten(set, a, us);
+}
+
 // One continuous omnidirectional move onto a calibrated pose: forward and sideways at the same time,
 // the wheel mix re-aimed on every poll at what is left of the error (sideways scaled up by STRAFE_EFF),
 // so the robot slides along a straight line to the target instead of axis by axis. The front, side
@@ -1451,6 +1468,7 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[
     }
   }
   float exD = ex, eyD = ey;
+  cornered = end == 3;
   if (moving && !io.driveEnd()) return fail(RL_F("stopped"));
   TRY(measure(us));
   toF(us, d);
@@ -1476,7 +1494,7 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[
 // gyro heading held. An imperfect pose never ends the run: it goes on from there, logged.
 bool Runner::align(Pose pose, uint8_t set, float target, float deadX, float deadY, uint8_t maxMoves, int16_t us[NUS]) {
   float best = 0;
-  uint8_t beamFixes = 0;
+  uint8_t beamFixes = 0, recoveries = 0;
   for (uint8_t move = 0;; ++move) {
     if (move == 0) TRY(measure(us));   // later rounds use the readings each move / heading hold ends with
     float d[NUS], ex, ey;
@@ -1507,6 +1525,7 @@ bool Runner::align(Pose pose, uint8_t set, float target, float deadX, float dead
       return true;
     }
     TRY(driveTo(pose, set, 0.7f * deadX, 0.7f * deadY, us));
+    if (cornered && recoveries < 2) { ++recoveries; TRY(recover(set, us)); continue; }
     TRY(hold(us));
   }
 }
@@ -1536,6 +1555,7 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     io.event(RL_F("step"), 1);
     TRY(faceWall(us));
     TRY(walkTo(APPROACH_MM, us));                                      // 1
+    if (cornered) TRY(recover(SET_ALL, us));                           //   stopped at a wall: back off, re-localize
   }
   if (first <= 2 && last >= 2) {
     io.event(RL_F("step"), 2);
@@ -1570,7 +1590,8 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     TRY(measure(us));
     memcpy(a, us, sizeof(a));
     TRY(walkTo(cal.ref[box][FRONT] + 150, us));                       // 5: straight, slowly
-    TRY(straighten(set, a, us));                                       //    heading from the main wall
+    if (cornered) TRY(recover(set, us));                               //    stopped at a wall: back off, re-localize
+    else TRY(straighten(set, a, us));                                  //    heading from the main wall
     TRY(align(box, set, 98, 4, 4, 8, us));                             // 6: into the box
     float yy;
     io.event(RL_F("parked"), us[FRONT], cal.ref[box][FRONT], io.yaw(&yy) && goalSet ? i16((yy - goal) * 10) : NONE);
