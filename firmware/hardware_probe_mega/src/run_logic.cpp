@@ -25,7 +25,8 @@ static const uint8_t SIDE_PWM = 68;     // continuous strafes; 2 Nov field: 80 w
 // Sensor sets: N uses all five; after a right turn (and its box) front, front-left (L45) and left side;
 // after a left turn front, front-right (R45) and right side.
 enum { SET_ALL = 0, SET_RIGHT_TURN = 1, SET_LEFT_TURN = 2 };
-static const int16_t BLOCK_MM = 20;     // 2 cm rule: no move toward a sensor reading this or less
+static const int16_t BLOCK_MM = 20;
+static const float CORNER_ZONE = 450;  // mm of front reading: the 10 cm corner stop applies only closer in     // 2 cm rule: no move toward a sensor reading this or less
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 static int16_t i16(float v) { return int16_t(clampf(v, -32000, 32000)); }
@@ -276,7 +277,11 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
     if (s * (d + v * stopTau - stopAt) <= 3) break;   // predicted distance after stopping
     if (z[FRONT] > 0 && s * (z[FRONT] - stopAt) < -10) break;   // a raw echo already past the target: stop, whatever the filter says
     // a corner closing on a wall at an angle: either 45 deg beam (filtered, 2+ echoes) under 100 mm
-    if (s > 0 && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm))) {
+    // Corners only exist near the walls (side walls ~30 cm deep from the main wall): with the front still
+    // more than CORNER_ZONE out, a close 45 deg echo is something on the open floor, not a wall (2 Nov: a
+    // ~70 mm echo at the start stopped every drive and the robot backed away all run).
+    bool nearWall = !live[FRONT] || kf[FRONT].dist() < CORNER_ZONE;
+    if (s > 0 && (nearWall && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm)))) {
       io.event(RL_F("corner_stop"), i16(kf[L45].dist()), i16(kf[R45].dist()));
       cornered = true;
       break;
@@ -1506,7 +1511,8 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[
     if (!doneY && (fabsf(eyP) <= stopY || eyP * ey0 < 0)) doneY = true;
     if (polls % 8 == 1) io.event(RL_F("mpoll"), i16(t), i16(ex), i16(ey), pwm);
     if (doneX && doneY) break;
-    if (mx > 0 && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm) ||
+    bool nearWall = !live[FRONT] || kf[FRONT].dist() < CORNER_ZONE;   // see driveForward
+    if (mx > 0 && ((nearWall && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm))) ||
                    (z[FRONT] > 0 && z[FRONT] < 40) ||   // the filtered front: a single short echo is not a wall (2 Nov at N)
                    (d[FRONT] > 0 && d[FRONT] < (ref[FRONT] != NONE && ref[FRONT] - 15 > 40 ? ref[FRONT] - 15 : 40)))) {
       io.event(RL_F("corner_stop"), i16(kf[L45].dist()), i16(kf[R45].dist()));
