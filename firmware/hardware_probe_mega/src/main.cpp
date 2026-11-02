@@ -1301,8 +1301,10 @@ static void runTournament() {
   gyroQuiet=true;if(!gyroRunning) gyroBegin();   // no I2C while a motor runs
   out.print(F("{\"type\":\"run_start\",\"first\":"));out.print(runFirst);out.print(F(",\"last\":"));out.print(runLast);out.println('}');
   MegaIo io;rl::Runner runner(io,calRam);
-  // The gyro zeroes itself once the robot has been still for 2 s; pressing the start button shakes the
-  // robot, so give it up to 10 s more (2 Nov: the run started 1 s before the zero and refused).
+  // A fresh gyro zero before every run, taken while the robot sits still at the start (2 Nov: a zero
+  // from power-on had drifted and a 90 deg gyro turn was ~60 deg on the floor). 2 s, applied only if
+  // still; otherwise it zeroes itself once still, up to 10 s more.
+  biasValid=false;gyroZero();
   if(!biasValid) {
     out.println(F("{\"type\":\"run_wait\",\"for\":\"gyro_zero\",\"note\":\"keep the robot still\"}"));
     for(uint32_t t=millis();!biasValid&&millis()-t<10000&&io.pump(););

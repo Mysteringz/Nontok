@@ -22,6 +22,7 @@ static const uint8_t CREEP_FLOOR = 41;   // PWM: creep speed at the target, rais
 static const int16_t SIDE_WINDOW = 250; // a side reading this far off its target is another surface
 static const uint8_t DRIVE_PWM = 45;    // creep top speed; 2 Nov field: 52 twice too fast, 47 a tiny bit too fast
 static const uint8_t SIDE_PWM = 68;     // continuous strafes; 2 Nov field: 80 was twice too fast
+static const int16_t BLOCK_MM = 20;     // 2 cm rule: no move toward a sensor reading this or less
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 static int16_t i16(float v) { return int16_t(clampf(v, -32000, 32000)); }
@@ -44,6 +45,8 @@ Runner::Runner(Io& io_, const Calib& cal_)
   memset(wcomp, 0, sizeof(wcomp));
   stopTau = 0.15f;
   beamSlope[0] = beamSlope[1] = beamSlope[2] = 0;
+  blocked = 0;
+  cornered = false;
   stopTauY = 0.08f;
   cornerMm = 100;  // mm: forward drives stop if a 45 deg beam reads less (corner closing on a wall)
   fixRate0[0] = 0.15f; fixRate0[1] = 0.08f; fixRate0[2] = 0.03f;   // mm/ms, mm/ms, deg/ms at FIX_PWM (learned)
@@ -53,12 +56,27 @@ Runner::Runner(Io& io_, const Calib& cal_)
 bool Runner::measure(int16_t us[NUS], float* rg) {
   float dummy;
   if (!io.measure(us, rg ? rg : &dummy)) return fail(RL_F("stopped"));
+  noteWalls(us);
   return true;
+}
+
+void Runner::noteWalls(const int16_t* z) {
+  for (uint8_t k = 0; k < NUS; ++k) {
+    if (z[k] <= 0) continue;   // no echo or not pinged: keep what is known
+    if (z[k] <= BLOCK_MM) blocked |= 1 << k;
+    else if (z[k] > 2 * BLOCK_MM) blocked &= ~(1 << k);
+  }
+}
+
+bool Runner::towardWall(int8_t x, int8_t y) const {
+  return (x > 0 && (blocked & ((1 << FRONT) | (1 << L45) | (1 << R45)))) ||
+         (y > 0 && (blocked & ((1 << LSIDE) | (1 << L45)))) || (y < 0 && (blocked & ((1 << RSIDE) | (1 << R45))));
 }
 
 bool Runner::pulse(int8_t x, int8_t y, int8_t w, uint8_t pwm, float ms, uint16_t* used, uint16_t lo, uint16_t hi) {
   uint16_t m = uint16_t(clampf(ms, lo, hi));
   if (used) *used = m;
+  if (towardWall(x, y)) { io.event(RL_F("wall_block"), x, y, blocked); if (used) *used = 0; return true; }
   if (!io.pulse(x, y, w, pwm, m)) return fail(RL_F("stopped"));
   return true;
 }
@@ -175,6 +193,8 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
   int8_t w = wcomp[0][s > 0];
   float before = 0, after;
   bool hasBefore = io.yaw(&before);
+  cornered = false;
+  if (towardWall(s * 100, 0)) { io.event(RL_F("wall_block"), s * 100, 0, blocked); cornered = true; return true; }
   if (!io.driveStart(s * 100, 0, w, pwm, FOCUS_FRONT)) return fail(RL_F("stopped"));
   uint16_t polls = 0;
   float tWin = 0, dWin = d0;
@@ -186,6 +206,8 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
     float dt;
     if (!io.drivePoll(z, &dt)) { io.driveEnd(); return fail(RL_F("stopped")); }
     t += dt * 1000;
+    noteWalls(z);
+    if (towardWall(s * 100, 0)) { io.event(RL_F("wall_block"), s * 100, 0, blocked); cornered = true; break; }
     for (uint8_t k = 0; k < NUS; ++k) {
       if (live[k]) kf[k].predict(dt);
       if (z[k] == NOT_PINGED) continue;
@@ -236,6 +258,7 @@ bool Runner::driveForward(float stopAt, float maxMs, uint8_t pwm, int16_t us[NUS
     // a corner closing on a wall at an angle: either 45 deg beam (filtered, 2+ echoes) under 100 mm
     if (s > 0 && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm))) {
       io.event(RL_F("corner_stop"), i16(kf[L45].dist()), i16(kf[R45].dist()));
+      cornered = true;
       break;
     }
     if (t >= maxMs || blind[FRONT] >= 4) break;
@@ -452,12 +475,15 @@ bool Runner::driveSide(Pose pose, float frac, int16_t us[NUS], bool* used) {
   uint8_t pwm = SIDE_PWM, blindL = 0, blindR = 0;
   float before = 0, after, t = 0, tWin = 0, eDecision = e0, rDecision = 0, eStart = e0;
   bool hasBefore = io.yaw(&before);
+  if (towardWall(0, s * 100)) { io.event(RL_F("wall_block"), 0, s * 100, blocked); return true; }
   if (!io.driveStart(0, s * 100, w, pwm, FOCUS_SIDES)) return fail(RL_F("stopped"));
   for (uint8_t polls = 0;; ++polls) {
     int16_t z[NUS];
     float dt;
     if (!io.drivePoll(z, &dt)) { io.driveEnd(); return fail(RL_F("stopped")); }
     t += dt * 1000;
+    noteWalls(z);
+    if (towardWall(0, s * 100)) { io.event(RL_F("wall_block"), 0, s * 100, blocked); break; }
     if (useL) { kl.predict(dt); if (z[LSIDE] != NOT_PINGED) { if (z[LSIDE] > 0 && kl.update(z[LSIDE])) blindL = 0; else ++blindL; } }
     if (useR) { kr.predict(dt); if (z[RSIDE] != NOT_PINGED) { if (z[RSIDE] > 0 && kr.update(z[RSIDE])) blindR = 0; else ++blindR; } }
     float e = EY(kl.dist(), kr.dist());
@@ -1208,6 +1234,7 @@ bool Runner::walkTo(int16_t target, int16_t us[NUS]) {
     if (us[FRONT] <= 0) { TRY(measure(us)); if (us[FRONT] <= 0) return true; continue; }
     if (us[FRONT] - target <= 15) return true;
     TRY(driveForward(target, CREEP_MAX_MS, DRIVE_PWM, us));
+    if (cornered) return true;   // stopped at a wall: never creep on toward it (2 Nov: 12 restarts, 45 deg at 47 mm)
     if (us[FRONT] > 150) TRY(hold(us));
   }
   return true;
@@ -1366,6 +1393,9 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[
     int8_t nx = int8_t(roundf(100 * cx / m)), ny = int8_t(roundf(100 * cy / m));
     if (nx > -8 && nx < 8) nx = 0;
     if (ny > -8 && ny < 8) ny = 0;
+    if (towardWall(nx, 0)) nx = 0;   // 2 cm rule: that direction is closed
+    if (towardWall(0, ny)) ny = 0;
+    if (!nx && !ny) { io.event(RL_F("wall_block"), i16(cx), i16(cy), blocked); end = 3; break; }
     float ax = fabsf(nx), ay = fabsf(ny);
     float top = (ax * DRIVE_PWM + ay * SIDE_PWM) / (ax + ay), lo = (ax * CREEP_FLOOR + ay * (SIDE_PWM - 6)) / (ax + ay);
     float left = fabsf(doneX ? 0 : exP) > fabsf(doneY ? 0 : eyP) ? fabsf(exP) : fabsf(eyP);
@@ -1383,6 +1413,7 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[
     float dt;
     if (!io.drivePoll(z, &dt)) { io.driveEnd(); return fail(RL_F("stopped")); }
     t += dt * 1000;
+    noteWalls(z);   // a newly closed direction is dropped from the mix on the next aim
     for (uint8_t k = 0; k < NUS; ++k) {
       if (live[k]) kf[k].predict(dt);
       if (z[k] == NOT_PINGED) continue;
