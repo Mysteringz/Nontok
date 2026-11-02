@@ -88,7 +88,7 @@ bool Runner::translate(uint8_t axis, float err, int16_t us[NUS], float maxMs, ui
     float stopAt = us[FRONT] - 0.9f * err;
     if (stopAt < 20) stopAt = 20;
     if (used) *used = 0;
-    return driveForward(stopAt, 800, 75, 60, us);
+    return driveForward(stopAt, 800, 62, 52, us);
   }
   float ms = DEAD_MS + FRACTION * fabsf(err) / k[axis];
   if (ms > maxMs) ms = maxMs;
@@ -628,7 +628,7 @@ bool Runner::park(Pose pose, int16_t us[NUS]) {
       continue;
     }
     if (toGo > 180) {
-      TRY(driveForward(ref[FRONT] + 150, 800, 75, 75, us));
+      TRY(driveForward(ref[FRONT] + 150, 800, 62, 62, us));
       TRY(hold(us));
       continue;
     }
@@ -641,12 +641,12 @@ bool Runner::park(Pose pose, int16_t us[NUS]) {
       }
     }
     if (toGo > 80) {   // creep to 6 cm short, then re-check the heading while there is still room to turn
-      TRY(driveForward(ref[FRONT] + 60, 800, 60, 60, us));
+      TRY(driveForward(ref[FRONT] + 60, 800, 52, 52, us));
       TRY(hold(us));
       continue;
     }
     if (toGo > 8) {   // the last stretch: straight, no rotation this close to the wall
-      TRY(driveForward(ref[FRONT], 800, 60, 60, us));
+      TRY(driveForward(ref[FRONT], 800, 52, 52, us));
       continue;
     }
     float y;
@@ -663,7 +663,7 @@ bool Runner::creepTest(int16_t target) {
   for (uint8_t i = 0; i < 8; ++i) {
     if (us[FRONT] <= 0) return fail(RL_F("no_front_echo"));
     if (us[FRONT] - target <= 8) { io.event(RL_F("creep_done"), us[FRONT], target); return true; }
-    TRY(driveForward(target, 800, 75, 60, us));
+    TRY(driveForward(target, 800, 62, 52, us));
   }
   io.event(RL_F("creep_done"), us[FRONT], target);
   return true;
