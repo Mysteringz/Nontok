@@ -20,7 +20,7 @@ enum { L45 = 0, R45 = 1, FRONT = 2, LSIDE = 3, RSIDE = 4, NUS = 5 };   // ultras
 enum Pose { P = 0, N = 1, N_LEFT = 2, BOX_LEFT = 3, N_RIGHT = 4, BOX_RIGHT = 5, NPOSE = 6 };
 const int16_t NONE = 9999;   // the capture had no steady reading for this sensor
 const int16_t NOT_PINGED = -2;   // drivePoll: this sensor was not pinged on this poll
-enum Focus { FOCUS_FRONT = 0, FOCUS_SIDES = 1, FOCUS_ALL = 2 };   // drivePoll ping schedule
+enum Focus { FOCUS_FRONT = 0, FOCUS_SIDES = 1, FOCUS_ALL = 2, FOCUS_LEFT = 3, FOCUS_RIGHT = 4 };   // drivePoll ping schedule
 
 // Recorded readings of each checkpoint (by ultrasonic index; NONE = not a target) and the colour
 // references (red/green count ratio x 1000).
@@ -118,7 +118,8 @@ class Io {
   // driveStart. driveSet changes the speed without stopping; driveEnd stops, lets the robot settle
   // and returns. false from any of them = stopped (STOP / button): the run ends.
   // focus FOCUS_SIDES (strafes): LSIDE, RSIDE, LSIDE, RSIDE, FRONT in turn instead (sides ~16 Hz).
-  // focus FOCUS_ALL (combined moves): FRONT, LSIDE, R45, FRONT, RSIDE, L45 in turn.
+  // focus FOCUS_ALL (combined moves at N): FRONT, LSIDE, RSIDE, FRONT, LSIDE, RSIDE, L45, R45 in turn;
+  // FOCUS_LEFT / FOCUS_RIGHT (after a turn): FRONT, side, FRONT, side, 45 deg on that side.
   virtual bool driveStart(int8_t x, int8_t y, int8_t w, uint8_t pwm, uint8_t focus) = 0;
   virtual bool driveSet(int8_t x, int8_t y, int8_t w, uint8_t pwm) = 0;
   virtual bool drivePoll(int16_t us[NUS], float* dt) = 0;
@@ -188,8 +189,8 @@ class Runner {
   bool park(Pose pose, int16_t us[NUS]);
   bool setGoal(float g);
   bool faceWall(int16_t us[NUS]);
-  bool driveTo(Pose pose, uint8_t set, float tol, int16_t us[NUS]);
-  bool align(Pose pose, uint8_t set, float target, float dead, uint8_t maxMoves, int16_t us[NUS]);
+  bool driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[NUS]);
+  bool align(Pose pose, uint8_t set, float target, float deadX, float deadY, uint8_t maxMoves, int16_t us[NUS]);
   bool straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS]);
   bool squareByMove(uint8_t set, float dist, int16_t us[NUS]);
   int16_t snapSum;     // driveForward: side-wall spacing (L + R) to snapshot at, 0 = off

@@ -1261,8 +1261,11 @@ class MegaIo : public rl::Io {
     while(millis()-lastPollMs<25) { service();if(runStop) { stopMotors();return false; } }
     service();
     static const uint8_t SIDES[5]={rl::LSIDE,rl::RSIDE,rl::LSIDE,rl::RSIDE,rl::FRONT};   // strafes
-    static const uint8_t ALL[6]={rl::FRONT,rl::LSIDE,rl::R45,rl::FRONT,rl::RSIDE,rl::L45};   // combined moves
-    uint8_t k=pollFocus==rl::FOCUS_SIDES?SIDES[pollCount%5]:pollFocus==rl::FOCUS_ALL?ALL[pollCount%6]:
+    static const uint8_t ALL[8]={rl::FRONT,rl::LSIDE,rl::RSIDE,rl::FRONT,rl::LSIDE,rl::RSIDE,rl::L45,rl::R45};   // combined moves at N
+    static const uint8_t LEFT[5]={rl::FRONT,rl::LSIDE,rl::FRONT,rl::LSIDE,rl::L45};    // after a right turn
+    static const uint8_t RIGHT[5]={rl::FRONT,rl::RSIDE,rl::FRONT,rl::RSIDE,rl::R45};   // after a left turn
+    uint8_t k=pollFocus==rl::FOCUS_SIDES?SIDES[pollCount%5]:pollFocus==rl::FOCUS_ALL?ALL[pollCount%8]:
+              pollFocus==rl::FOCUS_LEFT?LEFT[pollCount%5]:pollFocus==rl::FOCUS_RIGHT?RIGHT[pollCount%5]:
               (pollCount&1)?OTHERS[(pollCount>>1)&3]:uint8_t(rl::FRONT);++pollCount;
     for(uint8_t i=0;i<rl::NUS;++i) us[i]=rl::NOT_PINGED;
     us[k]=range(k);   // ultrasonic_mm order: trig/echo index = rl index

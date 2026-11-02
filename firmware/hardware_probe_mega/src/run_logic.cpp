@@ -1331,14 +1331,17 @@ bool Runner::squareByMove(uint8_t set, float dist, int16_t us[NUS]) {
 // crossed zero, and the robot stops when both are. Speed falls from the full creep / strafe power 200 mm
 // out to just above breakaway, rising 4 PWM per 400 ms without progress. It also stops after
 // MOVE_MAX_MS, when a tracked wall is lost, or when a front corner closes under cornerMm.
-bool Runner::driveTo(Pose pose, uint8_t set, float tol, int16_t us[NUS]) {
+bool Runner::driveTo(Pose pose, uint8_t set, float tolX, float tolY, int16_t us[NUS]) {
   const int16_t* ref = cal.ref[pose];
   float d[NUS], p[NUS];
   toF(us, d);
   float ex0, ey0, ex, ey, exP, eyP;
   bool hx, hy, h1, h2;
   posErr(ref, set, d, &ex0, &hx, &ey0, &hy);
-  bool doneX = !hx || fabsf(ex0) <= tol, doneY = !hy || fabsf(ey0) <= tol;
+  bool doneX = !hx || fabsf(ex0) <= tolX, doneY = !hy || fabsf(ey0) <= tolY;
+  // Undershoot by design: an axis stops at 30 % of its starting error (2 Nov field: aiming at zero, the
+  // filters' lag overshot strafes by 2x); the next move takes the rest, so the error shrinks each move.
+  const float stopX = fabsf(ex0) * 0.3f > tolX ? fabsf(ex0) * 0.3f : tolX, stopY = fabsf(ey0) * 0.3f > tolY ? fabsf(ey0) * 0.3f : tolY;
   if (doneX && doneY) return true;
   Kalman1D kf[NUS];
   bool live[NUS];
@@ -1369,7 +1372,7 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tol, int16_t us[NUS]) {
     uint8_t np = uint8_t(clampf(lo + (top - lo) * clampf(left / 200, 0, 1) + boost, 30, 120) + 0.5f);
     int8_t nw = int8_t(roundf((ax * (nx ? wcomp[0][nx > 0] : 0) + ay * (ny ? wcomp[1][ny > 0] : 0)) / (ax + ay)));
     if (!moving) {
-      if (!io.driveStart(nx, ny, nw, np, FOCUS_ALL)) return fail(RL_F("stopped"));
+      if (!io.driveStart(nx, ny, nw, np, set == SET_ALL ? FOCUS_ALL : set == SET_RIGHT_TURN ? FOCUS_LEFT : FOCUS_RIGHT)) return fail(RL_F("stopped"));
       moving = true;
       mx = nx; my = ny; mw = nw; pwm = np;
     } else if (fabsf(float(nx - mx)) > 4 || fabsf(float(ny - my)) > 4 || nw != mw || np + 2 <= pwm || np >= pwm + 2) {
@@ -1398,12 +1401,13 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tol, int16_t us[NUS]) {
     posErr(ref, set, p, &exP, &h1, &eyP, &h2);
     rx = live[FRONT] ? kf[FRONT].speed() : 0;
     ry = stopTauY > 0 ? (eyP - ey) / stopTauY : 0;
-    if (!doneX && (fabsf(exP) <= tol || exP * ex0 < 0)) doneX = true;
-    if (!doneY && (fabsf(eyP) <= tol || eyP * ey0 < 0)) doneY = true;
+    if (!doneX && (fabsf(exP) <= stopX || exP * ex0 < 0)) doneX = true;
+    if (!doneY && (fabsf(eyP) <= stopY || eyP * ey0 < 0)) doneY = true;
     if (polls % 8 == 1) io.event(RL_F("mpoll"), i16(t), i16(ex), i16(ey), pwm);
     if (doneX && doneY) break;
     if (mx > 0 && ((live[L45] && blind[L45] < 2 && kf[L45].dist() < cornerMm) || (live[R45] && blind[R45] < 2 && kf[R45].dist() < cornerMm) ||
-                   (z[FRONT] > 0 && z[FRONT] < (ref[FRONT] != NONE && ref[FRONT] - 15 > 40 ? ref[FRONT] - 15 : 40)))) {
+                   (z[FRONT] > 0 && z[FRONT] < 40) ||   // the filtered front: a single short echo is not a wall (2 Nov at N)
+                   (d[FRONT] > 0 && d[FRONT] < (ref[FRONT] != NONE && ref[FRONT] - 15 > 40 ? ref[FRONT] - 15 : 40)))) {
       io.event(RL_F("corner_stop"), i16(kf[L45].dist()), i16(kf[R45].dist()));
       end = 3;
       break;
@@ -1435,15 +1439,15 @@ bool Runner::driveTo(Pose pose, uint8_t set, float tol, int16_t us[NUS]) {
   return true;
 }
 
-// Feedback onto a calibrated pose: measure (two scans averaged after the first move), placement
+// Feedback onto a calibrated pose: measure (once; then the readings each move ends with), placement
 // accuracy over the stage's sensors (100 - rms mm, see accuracySet); done at `target`, when both
-// measured axes are inside `dead` mm, or after maxMoves; otherwise one combined move (driveTo) and the
+// measured axes are inside deadX / deadY mm, or after maxMoves; otherwise one combined move (driveTo) and the
 // gyro heading held. An imperfect pose never ends the run: it goes on from there, logged.
-bool Runner::align(Pose pose, uint8_t set, float target, float dead, uint8_t maxMoves, int16_t us[NUS]) {
+bool Runner::align(Pose pose, uint8_t set, float target, float deadX, float deadY, uint8_t maxMoves, int16_t us[NUS]) {
   float best = 0;
   uint8_t beamFixes = 0;
   for (uint8_t move = 0;; ++move) {
-    TRY(measureFine(us, move > 0));
+    if (move == 0) TRY(measure(us));   // later rounds use the readings each move / heading hold ends with
     float d[NUS], ex, ey;
     bool hx, hy;
     toF(us, d);
@@ -1462,30 +1466,31 @@ bool Runner::align(Pose pose, uint8_t set, float target, float dead, uint8_t max
         io.event(RL_F("beam_fix"), pose, i16(bv - br), i16(dth * 10));
         setGoal(goal + dth);
         TRY(rotateTo(goal, ROT_TOL, false));
+        TRY(measure(us));
         continue;
       }
     }
-    bool inBand = hx && hy && fabsf(ex) <= dead && fabsf(ey) <= dead;
+    bool inBand = hx && hy && fabsf(ex) <= deadX && fabsf(ey) <= deadY;
     if (acc >= target || inBand || move >= maxMoves || (!hx && !hy)) {
       io.event(RL_F("aligned"), pose, i16(acc), i16(best), acc >= target ? 1 : 0);
       return true;
     }
-    TRY(driveTo(pose, set, 0.7f * dead, us));
+    TRY(driveTo(pose, set, 0.7f * deadX, 0.7f * deadY, us));
     TRY(hold(us));
   }
 }
 
-// GAME PLAN (2 Nov, user):
+// GAME PLAN (2 Nov, user; second field day):
 //  1 creep straight at the start heading until the front reads ~50 cm (a 45 deg beam under 10 cm stops it)
 //  2 straight on to N's front reading: once both side walls are tracked, their change against the
-//    front's gives the heading (skewFrom), turned out; combined omnidirectional moves onto N (>= 95 %);
-//    a heading check (straight 80 mm forward, skew turned out) and align again       [end of stage 1]
-//  3 read the colour                                                                [end of stage 2]
-//  4 turn 90 deg in one motion (gyro); 5 align on the turned capture with front, front-45 and the side
-//    facing the main wall (>= 95 %), heading check (straight 100 mm forward), align again
-//  6 straight forward to 150 mm short of the box, the front and 45 deg beams guarding the walls (the
-//    side on the main wall gives the heading again); 7 combined moves into the box (>= 98 %), the
-//    front never closer than the box's front reading - 15 mm
+//    front's gives the heading (skewFrom), turned out; combined omnidirectional moves onto N. The front
+//    at N flips between two echoes ~25 mm apart (2 Nov), so forward is done within 15 mm, sideways 8 mm
+//    (the short heading-check move was dropped: over 8 cm the side noise gave a 13 deg error)
+//  3 read the colour; 4 turn 90 deg in one motion (gyro)
+//  5 no settling on the turned capture (it was 11 cm off N's newer capture and cost ~1 min): straight
+//    forward to 150 mm short of the box, the front and 45 deg beams guarding the walls, the side on the
+//    main wall giving the heading; 6 combined moves into the box (>= 98 %), front never closer than the
+//    box's front reading - 15 mm
 // An imperfect position never ends the run: each stage logs its accuracy and the run goes on.
 bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
   why = 0;
@@ -1511,9 +1516,7 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
       if (snapped) memcpy(a, snap, sizeof(a));
     }
     TRY(straighten(SET_ALL, a, us));                                   //    heading from the side walls
-    TRY(align(N, SET_ALL, 95, 4, 10, us));                             //    combined moves onto N
-    TRY(squareByMove(SET_ALL, 80, us));                                //    heading check
-    TRY(align(N, SET_ALL, 95, 4, 10, us));
+    TRY(align(N, SET_ALL, 95, 15, 8, 6, us));                          //    combined moves onto N
   }
   turnDir = forceTurn;
   if (first <= 3 && last >= 3) {
@@ -1526,23 +1529,18 @@ bool Runner::run(uint8_t first, uint8_t last, int8_t forceTurn) {
     turnDir = rg > split ? -1 : 1;   // red turns right, green turns left
     io.event(RL_F("colour"), i16(rg * 1000), i16(conf * 100), turnDir);
     TRY(turnOnce(turnDir > 0));                                        // 4
-    Pose turned = turnDir > 0 ? N_LEFT : N_RIGHT;
-    uint8_t set = turnDir > 0 ? SET_LEFT_TURN : SET_RIGHT_TURN;
-    TRY(align(turned, set, 95, 4, 8, us));                             // 5
-    TRY(squareByMove(set, 100, us));                                   //    heading check
-    TRY(align(turned, set, 95, 4, 8, us));
   }
   if (first <= 4 && last >= 4) {
     io.event(RL_F("step"), 4);
     if (turnDir == 0) return fail(RL_F("no_turn_direction"));
     Pose box = turnDir > 0 ? BOX_LEFT : BOX_RIGHT;
     uint8_t set = turnDir > 0 ? SET_LEFT_TURN : SET_RIGHT_TURN;
-    beamSlope[set] = 0;   // the box's beams see other surfaces than at the turned checkpoint: learn afresh
+    beamSlope[set] = 0;   // learned afresh from the box approach's own turn
     TRY(measure(us));
     memcpy(a, us, sizeof(a));
-    TRY(walkTo(cal.ref[box][FRONT] + 150, us));                       // 6: straight, slowly
+    TRY(walkTo(cal.ref[box][FRONT] + 150, us));                       // 5: straight, slowly
     TRY(straighten(set, a, us));                                       //    heading from the main wall
-    TRY(align(box, set, 98, 3, 8, us));                                // 7: into the box
+    TRY(align(box, set, 98, 4, 4, 8, us));                             // 6: into the box
     float yy;
     io.event(RL_F("parked"), us[FRONT], cal.ref[box][FRONT], io.yaw(&yy) && goalSet ? i16((yy - goal) * 10) : NONE);
   }
