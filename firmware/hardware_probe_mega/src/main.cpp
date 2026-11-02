@@ -748,6 +748,7 @@ static void btAt(const char* text,bool crlf) {
 }
 // One timed mecanum move: x forward, y left, w CCW, each -100..100, mixed like the step controller
 // and scaled so the busiest wheel gets pwm; stops by itself after ms (pulse_done). Needs a wheel map.
+static const int16_t WHEEL_MIN_PWM=30;
 static bool applyMix(int16_t x,int16_t y,int16_t w,int16_t p) {
   if(abs(x)>100||abs(y)>100||abs(w)>100||p<30||p>int16_t(DRIVE_PWM_MAX)) {
     out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return false;
@@ -756,8 +757,17 @@ static bool applyMix(int16_t x,int16_t y,int16_t w,int16_t p) {
   float wheel[4]={float(x-y-w),float(x+y+w),float(x+y-w),float(x-y+w)},peak=0;  // FL FR RL RR
   for(float v:wheel) peak=max(peak,fabsf(v));
   if(peak<1) { out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return false; }
+  // Every turning wheel gets at least WHEEL_MIN_PWM (about where a loaded wheel starts to turn) plus a
+  // linear share, so wheel speed stays proportional to the mix: the slow wheels of a diagonal move no
+  // longer stall and the robot goes the commanded direction (2 Nov: it went forward, then sideways).
+  // Pure forward, strafe and turn moves (all wheels equal) are unchanged.
   int16_t raw[4]={};
-  for(uint8_t q=0;q<4;++q) raw[wheelMotor[q]]=wheelSign[q]*int16_t(p*wheel[q]/peak);
+  for(uint8_t q=0;q<4;++q) {
+    float u=wheel[q]/peak;
+    if(fabsf(u)<0.05f) continue;
+    int16_t mag=p>WHEEL_MIN_PWM?int16_t(WHEEL_MIN_PWM+(p-WHEEL_MIN_PWM)*fabsf(u)):int16_t(p*fabsf(u));
+    raw[wheelMotor[q]]=wheelSign[q]*(u>0?mag:-mag);
+  }
   for(uint8_t m=0;m<4;++m) setMotor(m,raw[m]);
   return true;
 }
@@ -1251,7 +1261,9 @@ class MegaIo : public rl::Io {
     while(millis()-lastPollMs<25) { service();if(runStop) { stopMotors();return false; } }
     service();
     static const uint8_t SIDES[5]={rl::LSIDE,rl::RSIDE,rl::LSIDE,rl::RSIDE,rl::FRONT};   // strafes
-    uint8_t k=pollFocus==rl::FOCUS_SIDES?SIDES[pollCount%5]:(pollCount&1)?OTHERS[(pollCount>>1)&3]:rl::FRONT;++pollCount;
+    static const uint8_t ALL[6]={rl::FRONT,rl::LSIDE,rl::R45,rl::FRONT,rl::RSIDE,rl::L45};   // combined moves
+    uint8_t k=pollFocus==rl::FOCUS_SIDES?SIDES[pollCount%5]:pollFocus==rl::FOCUS_ALL?ALL[pollCount%6]:
+              (pollCount&1)?OTHERS[(pollCount>>1)&3]:uint8_t(rl::FRONT);++pollCount;
     for(uint8_t i=0;i<rl::NUS;++i) us[i]=rl::NOT_PINGED;
     us[k]=range(k);   // ultrasonic_mm order: trig/echo index = rl index
     uint32_t now=millis();*dt=(now-lastPollMs)/1000.0f;lastPollMs=now;
