@@ -1,0 +1,1374 @@
+// Hardware probe and the on-Mega tournament run. RUN executes the stop-and-go controller in
+// run_logic.cpp (positions from the ultrasonics, heading from the gyro read only while stopped)
+// using the calibration stored by CALSAVE, the only EEPROM write (see calCommand). Other motion is
+// "SPIN m +|-" (one motor, PWM 90/255, stops after 0.8 s) for identifying wheels, and
+// "MOT a b c d" manual drive (raw signed PWM for M1..M4, |v| <= 200, stops unless
+// refreshed within 0.4 s), and "TURNTEST a b c d" (see ttEnd). STOP, '!' or a malformed line stops all motors. If the program
+// freezes, a watchdog interrupt at 0.5 s cuts every motor PWM, and a reset follows at 1 s.
+// Colour S0/S1 = D28/D25 (20% scaling) and S2/S3 = D30/D29 (filter) are driven since 23 Oct.
+// The only writes beyond PWM inhibit go to volatile registers of an identified MPU gyro.
+// Gyro: shield IMU header on the Mega TWI bus (SDA D20 / SCL D21), shared with OLED 0x3c.
+// Bluetooth: HC-05/06-class SPP module on Serial3 (TX3 D14 / RX3 D15) at 9600 baud.
+// It gets every event line, a compact sample at 1 Hz and a short F line at the other 5 Hz
+// sample times (9600 baud cannot carry the full USB stream), and accepts the same commands. Output is sent only
+// within 5 s of a host "PING": an unconnected module parses its input as AT commands.
+#include <Arduino.h>
+#include <Wire.h>
+#include <avr/wdt.h>
+#include "../../core_robot_mega/include/frequency_color.h"
+#include "../../core_robot_mega/include/mpu_gyro.h"
+#include <EEPROM.h>
+#include <U8x8lib.h>
+#include "run_logic.h"
+extern "C" uint8_t colorPulseBurst();
+static_assert(F_CPU==core::COLOR_CPU_HZ,"Probe sampling requires a 16 MHz Mega");
+static const uint8_t pwm[]={12,8,9,5};
+// M1..M4 direction pins, updated-shield profile (M4 on A4/A5), as in config.h.
+static const uint8_t motorIn1[]={34,37,43,A4},motorIn2[]={35,36,42,A5};
+// Wheel encoders (shield maker's MecanumRobotPS2Control.ino): channel A of M1..M4 on interrupt pins
+// 18, 19, 3, 2 (B on 31, 38, 49, A1: not read; A1 is a light sensor here). Rising edges of A only: the
+// direction is the commanded one, so a tick count measures how far a wheel turned.
+static const uint8_t encPin[4]={18,19,3,2};
+static volatile uint32_t encCount[4]={};
+static void enc0() { ++encCount[0]; }
+static void enc1() { ++encCount[1]; }
+static void enc2() { ++encCount[2]; }
+static void enc3() { ++encCount[3]; }
+static void encShow();   // ENC command; defined after the output stream
+static uint32_t encTotal() { noInterrupts();uint32_t s=encCount[0]+encCount[1]+encCount[2]+encCount[3];interrupts();return s; }
+static const uint8_t SPIN_PWM=90,DRIVE_PWM_MAX=200;
+static const uint16_t SPIN_MS=800,DRIVE_WATCHDOG_MS=400;
+static bool motorsLive=false;static int8_t spinning=-1;static uint32_t motorDeadline=0;
+static bool pulsing=false;   // A timed PULSE move is running; its end is reported as pulse_done.
+// Tournament run on the Mega (RUN, see runTournament): requested by a command, executed from
+// loop(); STOP, '!' or a malformed line set runStop and the run ends at its next wait.
+static bool runRequested=false,runActive=false,runStop=false;
+static uint8_t runFirst=1,runLast=4;static int8_t runForceTurn=0;
+static int16_t creepTestTarget=0;   // CREEP n: >0 requests the slow-approach test instead of the run
+// Start by the reset button (or power switch): with AUTORUN ON stored, every start except a
+// watchdog reset counts down 10 s (LED D13 blinking, faster for the last 3 s), then runs.
+// Any byte on USB (bench work: plugging USB in also resets the board) or a STOP cancels it;
+// Bluetooth does not, so a computer can connect and watch the run.
+static const int AUTORUN_ADDRESS=3964;static const uint8_t AUTORUN_MAGIC=0xA5;
+static const uint16_t AUTORUN_MS=10000;static const uint8_t AUTORUN_LED=13;
+// What the OLED shows about the run (oledService): step 1-4, colour turn (+1 left/green, -1 right/red)
+// and the result of the last run (0 none, 1 parked, 2 stopped, with the controller's reason).
+static uint8_t runStepNow=0,uiResult=0;static int8_t runTurnNow=0;static char uiReason[17]="";
+static uint32_t autorunAt=0;static bool autorunPending=false;
+static bool autorunUsbCancels=false;   // power-on countdowns only; a button countdown is deliberate
+static void autorunCancel(const __FlashStringHelper* why);
+static uint8_t notReady();   // defined with the button code
+// Start button between an analog pin and GND (internal pull-up; the shield's analog row, signal and
+// GND pins of one column; never its 5 V pin). Press: start the 10 s countdown; press during the
+// countdown: cancel; press during a run: stop. Ignored for 1.5 s after boot and until released
+// if it was already held at boot, so a stuck or pre-pressed button cannot start the robot.
+// The button is on A15 (found 2 Nov by watching A8..A15). The sample still reports every pin of A8..A15
+// that reads low (btn_pins, bit 0 = A8 ... bit 7 = A15) for wiring checks, but only A15 starts a run.
+static const uint8_t BTN_FIRST=A8,BTN_COUNT=8,BTN_START_MASK=0x80;
+static uint8_t btnMask() { uint8_t m=0;for(uint8_t i=0;i<BTN_COUNT;++i) if(digitalRead(BTN_FIRST+i)==LOW) m|=uint8_t(1<<i);return m; }
+static bool btnRaw=true,btnStable=true,btnIgnoreUntilRelease=false;static uint32_t btnChangedAt=0;
+// Live state in every sample (start_btn: 1 = pressed now or since the previous sample, so a short
+// tap between two samples still shows): btnSeen is set by buttonService, read once per sample().
+static uint8_t btnSeenMask=0,btnPinsReport=0;static bool btnReport=false;
+// Soft start: outputs step toward their targets by RAMP_STEP every RAMP_MS (0->100 in
+// ~125 ms), limiting the inrush that reset the board with four motors starting at once.
+// Stopping is never ramped. rampUp: the step while a wheel speeds up (Runner::finalAdjust lowers it, user
+// 3 Nov: the small fix moves in the box started too hard and overshot).
+static const uint8_t RAMP_STEP=8,RAMP_MS=10;static uint8_t rampUp=RAMP_STEP;
+static int16_t motorTarget[4]={},motorNow[4]={};static uint32_t lastRampMs=0;
+// The bootloader clears MCUSR, so the watchdog's early interrupt leaves its own mark in
+// RAM that a reset does not initialise. Any other value means power-on/brown-out/external.
+static const uint16_t WATCHDOG_MARK=0xA55A;
+static uint16_t resetMark __attribute__((section(".noinit")));
+// Set while running. Retained RAM after a reset without the watchdog mark means a brown-out
+// or reset line (with no USB cable that is almost certainly brown-out); lost RAM = power-on.
+static const uint16_t RUNNING_MARK=0x5AA5;
+static uint16_t runningMark __attribute__((section(".noinit")));
+static bool lastResetWatchdog=false;
+static const __FlashStringHelper* bootCause=0;
+// Ultrasonics, index order kept as they were added: front-left +45 deg PL1/PL2 (D48/D47) and
+// front-right -45 deg PG1/PG0 (D40/D41) since the plug swap; front PA0/PA2 (D22/D24), left
+// side +90 deg PB4/PB5 (D10/D11) and right side -90 deg PH3/PH4 (D6/D7), wired 27 Oct.
+// Used as plain GPIO; the motor PWM channels on the same timers are unaffected.
+static const uint8_t US_COUNT=5,trig[US_COUNT]={48,40,22,10,6},echo[US_COUNT]={47,41,24,11,7};
+// Consecutive pings face 90-135 deg apart, so a 15 ms gap avoids cross-talk and all five
+// fit the 200 ms sample: front-left, right side, front, left side, front-right.
+static const uint8_t PING_ORDER[US_COUNT]={0,4,2,3,1};
+// Sensor self-check, shown on the OLED and reported as "chk" (bit k = ultrasonic k, bits 5-8 = adc[0..3],
+// bit 9 = colour): an ultrasonic is OK once it has returned a valid echo in the last 10 s (open space
+// returns none, so waving a hand in front of it proves it); an LDR is OK unless stuck at a rail; the
+// colour sensor is OK when red, green and blue all count. Updated by sample().
+static uint32_t usSeenAt[US_COUNT]={};static bool ldrOk[4]={},clrOk=false;
+static bool usOk(uint8_t k) { return usSeenAt[k]&&millis()-usSeenAt[k]<10000UL; }
+static uint16_t checkMask() {
+  uint16_t m=0;
+  for(uint8_t k=0;k<US_COUNT;++k) if(usOk(k)) m|=uint16_t(1)<<k;
+  for(uint8_t i=0;i<4;++i) if(ldrOk[i]) m|=uint16_t(1)<<(5+i);
+  if(clrOk) m|=uint16_t(1)<<9;
+  return m;
+}
+static const uint8_t light[]={A0,A7,A2,A6}; // LDRs; physically left to right A0,A2,A7,A6 (page reorders). Higher ADC = brighter. A1/A3 not used, A4/A5 are M4.
+// User-reported 2026-10-23: gyro INT wire on D33 (PC4, polled; no interrupt on PORTC).
+static const uint8_t gyroInt=33;
+static const uint8_t colorS0=28,colorS1=25,colorS2=30,colorS3=29;
+static const unsigned long BLUETOOTH_BAUD=9600;
+static uint32_t lastSample=0,sampleCount=0,btQuietUntil=0,btPingMs=0;
+static bool btPinged=false;
+static bool btHostPresent() { return btPinged&&millis()-btPingMs<5000&&int32_t(millis()-btQuietUntil)>=0; }
+struct LineReader { char line[48];uint8_t used=0;bool dropping=false; };  // Room for REF/WMAP lines.
+static LineReader usbReader,btReader;
+// Event lines go to both links.
+class BothLinks : public Print {
+ public:
+  size_t write(uint8_t c) override { Serial.write(c);if(btHostPresent()) Serial3.write(c);return 1; }
+};
+static BothLinks out;
+static int16_t accelRaw[3]={};static bool accelOk=false;
+
+static uint8_t gyroAddress=0,gyroWho=0;
+static const char* gyroModel=0;
+static bool gyroRunning=false,anglesValid=false,intLast=false;
+static float bias[3]={},biasSd[3]={},angle[3]={};
+static int16_t lastRaw[3]={};
+static uint32_t frames=0,intRises=0,intDrains=0,timerDrains=0,busErrors=0,lastDrainMs=0,lastFrameMs=0;
+static uint32_t i2cTimeouts=0,gyroRestarts=0,gyroResets=0;static bool gyroNeedsSetup=false;
+// QUIETGYRO: no I2C at all while a motor runs (motor noise corrupts the bus). The chip keeps
+// sampling into its FIFO (~0.85 s of gyro frames at 200 Hz), drained once the motors stop.
+static bool gyroQuiet=false;
+static uint16_t overflows=0,saturated=0;
+
+static void inhibitMotors() {
+  // PWM is common to both known shield revisions. Direction/encoder pins untouched.
+  for(uint8_t pin:pwm) { digitalWrite(pin,LOW);pinMode(pin,OUTPUT); }
+}
+ISR(WDT_vect) {
+  // Program frozen for 0.5 s: cut motor power now; hardware resets at the next timeout.
+  for(uint8_t pin:pwm) digitalWrite(pin,LOW);
+  resetMark=WATCHDOG_MARK;
+}
+static void haltMotors() {
+  inhibitMotors();
+  if(motorsLive) for(uint8_t m=0;m<4;++m) { digitalWrite(motorIn1[m],LOW);digitalWrite(motorIn2[m],LOW); }
+  motorsLive=false;spinning=-1;pulsing=false;
+  for(uint8_t m=0;m<4;++m) motorTarget[m]=motorNow[m]=0;
+}
+// "TURNTEST a b c d": 4 x (turn 180, turn back), run on board and ended by gyro Z, so it
+// keeps going with no host link: a link blackout that leaves the test and the uptime
+// running means the Mega stayed on. a..d = raw PWM turning the robot one way (from the
+// page's wheel map); odd legs run the negation. Any stop cancels it.
+static const uint8_t TT_LEGS=8,TT_IDLE=0,TT_RUNNING=1,TT_DONE=2,TT_ABORTED=3;
+static const float TT_DEG=180,TT_LEAD_DEG=12; // Power is cut early; braking finishes the turn.
+static const uint16_t TT_LEG_TIMEOUT_MS=8000,TT_PAUSE_MS=1000;
+static int16_t ttPwm[4]={};
+static int8_t ttLeg=-1;static uint8_t ttState=TT_IDLE,ttLegsDone=0;
+static bool ttTurning=false;static float ttStartDeg=0;static uint32_t ttSinceMs=0;
+static void ttEnd(uint8_t state,const __FlashStringHelper* reason) {
+  haltMotors();ttLeg=-1;ttTurning=false;ttState=state;
+  out.print(F("{\"type\":\"turntest_end\",\"result\":\""));out.print(state==TT_DONE?F("done"):F("aborted"));
+  out.print(F("\",\"reason\":\""));out.print(reason);
+  out.print(F("\",\"legs_done\":"));out.print(ttLegsDone);out.print(F(",\"of\":"));out.print(TT_LEGS);
+  out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+}
+// Tournament step tests: the controller is further below, next to the sampler it reads.
+static const uint8_t STEP_IDLE=0,STEP_GO=1,STEP_TURN=2;
+static uint8_t stepKind=STEP_IDLE;
+static void stepEnd(bool reached,const __FlashStringHelper* reason);
+static void stepReport(Print& o);
+static void stopMotors() {
+  if(ttLeg>=0) ttEnd(TT_ABORTED,F("stopped"));
+  if(stepKind!=STEP_IDLE) stepEnd(false,F("stopped"));
+  haltMotors();
+}
+// Positive = IN1 HIGH / IN2 LOW, matching the core's speed>=0 convention.
+static void applyMotor(uint8_t m,int16_t value) {
+  pinMode(motorIn1[m],OUTPUT);pinMode(motorIn2[m],OUTPUT);
+  analogWrite(pwm[m],0);
+  digitalWrite(motorIn1[m],value>0?HIGH:LOW);digitalWrite(motorIn2[m],value<0?HIGH:LOW);
+  if(value) analogWrite(pwm[m],min(abs(value),int16_t(DRIVE_PWM_MAX)));
+}
+static void setMotor(uint8_t m,int16_t value) {
+  motorTarget[m]=constrain(value,-int16_t(DRIVE_PWM_MAX),int16_t(DRIVE_PWM_MAX));
+}
+static void rampMotors() {
+  if(!motorsLive||millis()-lastRampMs<RAMP_MS) return;
+  lastRampMs=millis();
+  for(uint8_t m=0;m<4;++m) {
+    int16_t now=motorNow[m],target=motorTarget[m];
+    if(now==target) continue;
+    // Linear steps pass through zero on reversal, so direction flips at zero output.
+    // speeding up (same sign, larger) at rampUp; slowing down or reversing at RAMP_STEP
+    int16_t step=(abs(target)>abs(now)&&(now==0||(now>0)==(target>0)))?rampUp:RAMP_STEP;
+    now+=constrain(target-now,-step,step);
+    motorNow[m]=now;applyMotor(m,now);
+  }
+}
+static bool parseDrive(const char* text,int16_t* v) {
+  for(uint8_t m=0;m<4;++m) {
+    char* end;long value=strtol(text,&end,10);
+    if(end==text||value<-255||value>255) return false;
+    v[m]=value;text=end;
+  }
+  while(*text==' ') ++text;
+  return !*text;
+}
+static void ttStartLeg() {
+  int8_t dir=ttLeg%2?-1:1;
+  for(uint8_t m=0;m<4;++m) setMotor(m,dir*ttPwm[m]);
+  motorsLive=true;spinning=-1;ttTurning=true;ttStartDeg=angle[2];
+  ttSinceMs=millis();motorDeadline=ttSinceMs+DRIVE_WATCHDOG_MS;
+}
+static void ttService() {
+  if(ttLeg<0) return;
+  uint32_t now=millis();float turned=fabs(angle[2]-ttStartDeg);
+  if(ttTurning) {
+    motorDeadline=now+DRIVE_WATCHDOG_MS;
+    if(turned>=TT_DEG-TT_LEAD_DEG) { haltMotors();ttTurning=false;ttSinceMs=now; }
+    else if(now-ttSinceMs>=TT_LEG_TIMEOUT_MS) ttEnd(TT_ABORTED,F("leg_timeout_no_gyro_progress"));
+    return;
+  }
+  if(now-ttSinceMs<TT_PAUSE_MS) return;
+  // Settled: the reported angle includes braking overshoot.
+  ttLegsDone=ttLeg+1;
+  out.print(F("{\"type\":\"turntest_leg\",\"leg\":"));out.print(ttLegsDone);out.print(F(",\"of\":"));out.print(TT_LEGS);
+  out.print(F(",\"turned_deg\":"));out.print(turned,1);out.print(F(",\"angles_valid\":"));out.print(anglesValid);
+  out.print(F(",\"ms\":"));out.print(now);out.println('}');
+  if(++ttLeg>=TT_LEGS) ttEnd(TT_DONE,F("complete"));else ttStartLeg();
+}
+static void ttReport(Print& o) {
+  static const char* const names[]={"idle","running","done","aborted"};
+  o.print(F(",\"turntest\":{\"state\":\""));o.print(names[ttState]);
+  o.print(F("\",\"legs_done\":"));o.print(ttLegsDone);o.print(F(",\"of\":"));o.print(TT_LEGS);o.print('}');
+}
+// Wire here (framework-arduino-avr 5.2.0) has no timeout unless asked, and it does not define
+// WIRE_HAS_TIMEOUT, so the former #if-guarded call compiled to nothing. Motor noise on
+// SDA/SCL then left a transfer waiting forever and the watchdog rebooted the board.
+// The limit covers a whole transfer: a 30-byte FIFO read alone takes ~2.8 ms at 100 kHz.
+static const uint32_t I2C_TIMEOUT_US=25000;
+static void i2cBegin() { Wire.begin();Wire.setClock(100000);Wire.setWireTimeout(I2C_TIMEOUT_US,true); }
+// Free a bus a slave holds mid-byte: up to 9 SCL clocks until SDA is released, then STOP.
+static void i2cRecover() {
+  Wire.end();pinMode(SDA,INPUT_PULLUP);pinMode(SCL,INPUT_PULLUP);  // Open drain by hand.
+  for(uint8_t i=0;i<9&&!digitalRead(SDA);++i) {
+    digitalWrite(SCL,LOW);pinMode(SCL,OUTPUT);delayMicroseconds(5);
+    pinMode(SCL,INPUT_PULLUP);delayMicroseconds(5);
+  }
+  digitalWrite(SDA,LOW);pinMode(SDA,OUTPUT);delayMicroseconds(5);  // SDA rises with SCL high.
+  pinMode(SDA,INPUT_PULLUP);delayMicroseconds(5);
+  i2cBegin();
+}
+// Call after any failed transfer: only a timeout means the bus itself was stuck.
+static bool i2cFailed() {
+  if(Wire.getWireTimeoutFlag()) { Wire.clearWireTimeoutFlag();++i2cTimeouts;i2cRecover();gyroNeedsSetup=gyroRunning; }
+  return false;
+}
+static bool reg(uint8_t address,uint8_t index,uint8_t* data,uint8_t count) {
+  Wire.beginTransmission(address);Wire.write(index);
+  if(Wire.endTransmission(false)!=0||Wire.requestFrom(address,count)!=count) return i2cFailed();
+  for(uint8_t i=0;i<count;++i) data[i]=Wire.read();
+  return true;
+}
+static void scan() {
+  out.print(F("{\"type\":\"i2c\",\"bus\":\"D20/D21\",\"addresses\":["));bool first=true;
+  for(uint8_t address=8;address<120;++address) {
+    Wire.beginTransmission(address);
+    if(Wire.endTransmission()==0) { if(!first) out.print(',');out.print(address);first=false; }
+    else i2cFailed();
+  }
+  out.println(F("],\"note\":\"ACK does not identify a device model\"}"));
+}
+static int16_t range(uint8_t channel) {
+  digitalWrite(trig[channel],LOW);delayMicroseconds(2);
+  digitalWrite(trig[channel],HIGH);delayMicroseconds(10);digitalWrite(trig[channel],LOW);
+  uint32_t duration=pulseIn(echo[channel],HIGH,18000UL);  // ~3 m: the arena is 1.5 m wide.
+  int16_t mm=duration?duration*0.1715f:-1;
+  return mm>=20&&mm<=4000?mm:-1;
+}
+
+static bool gyroWrite(uint8_t index,uint8_t value) {
+  Wire.beginTransmission(gyroAddress);Wire.write(index);Wire.write(value);
+  return Wire.endTransmission()==0||i2cFailed();
+}
+static void fifoRestart() {
+  gyroWrite(core::MPU_USER_CTRL,core::MPU_USER_FIFO_RESET);
+  gyroWrite(core::MPU_USER_CTRL,core::MPU_USER_FIFO_ON);
+}
+// Drain whole yaw (Z) samples (see mpuSetup). Status is read first: any register read clears it.
+// trace (sweeps): called after every sample with its index and the sample count found, so a caller
+// can give each ping taken while the motors ran the heading at its time.
+static const uint8_t GYRO_FRAME=2;
+typedef void (*GyroTrace)(uint16_t index,uint16_t total);
+static uint16_t gyroDrain(float* sum,float* squares,GyroTrace trace=0) {
+  uint8_t status,count[2],data[30]; // Wire buffers 32 bytes: fifteen Z samples.
+  if(!reg(gyroAddress,core::MPU_INT_STATUS,&status,1)||
+     !reg(gyroAddress,core::MPU_FIFO_COUNT,count,2)) { ++busErrors;return 0; }
+  uint16_t bytes=(uint16_t(count[0])<<8)|count[1];
+  // The MPU6050 (WHO_AM_I 0x68) has a 1024-byte FIFO, 2.5 s of yaw samples: QUIETGYRO relies on
+  // it across a whole move. Other models keep the 512-byte family minimum.
+  uint16_t fifoLimit=gyroWho==0x68?1000:core::MPU_FIFO_BYTES_MIN;
+  if((status&core::MPU_INT_FIFO_OVERFLOW)||bytes>=fifoLimit) {
+    ++overflows;anglesValid=false;fifoRestart();return 0;
+  }
+  uint16_t drained=0;bytes-=bytes%GYRO_FRAME;
+  const uint16_t total=bytes/GYRO_FRAME;
+  while(bytes) {
+    uint8_t chunk=bytes>sizeof(data)?sizeof(data):bytes;
+    if(!reg(gyroAddress,core::MPU_FIFO_RW,data,chunk)) {
+      ++busErrors;anglesValid=false;fifoRestart();return drained;
+    }
+    for(uint8_t at=0;at<chunk;at+=GYRO_FRAME,++drained) {
+      int16_t raw=core::mpuWord(data+at);lastRaw[2]=raw;
+      if(core::mpuSaturated(raw)) { ++saturated;anglesValid=false; }
+      angle[2]+=core::mpuSampleDegrees(raw,bias[2]);
+      if(sum) { sum[2]+=raw;squares[2]+=float(raw)*raw; }
+      if(trace) trace(drained,total);
+    }
+    bytes-=chunk;
+  }
+  frames+=drained;if(drained) lastFrameMs=millis();
+  return drained;
+}
+// Only the yaw axis (Z) goes into the FIFO: 2 bytes a sample at 200 Hz, so the MPU6050's 1024 bytes
+// hold 2.5 s instead of 0.85 s with all three axes. That is room for a smooth sweep, a long drive or
+// a 90 deg turn with no I2C while the motors run (QUIETGYRO). X/Y are not used for control.
+static bool mpuSetup() {
+  bool ok=true;
+  for(const core::MpuWrite& w:core::MPU_SETUP) ok=gyroWrite(w.reg,w.value)&&ok;
+  return gyroWrite(core::MPU_FIFO_EN,core::MPU_FIFO_GYRO_BIT[2])&&ok;
+}
+// Noise or a supply dip can reset the MPU (back to sleep) or wedge its FIFO. Re-apply the
+// setup without the 2 s re-zero: the bias stays valid, the integrated angles do not.
+static void gyroConfigure() {
+  gyroNeedsSetup=false;lastFrameMs=millis();++gyroRestarts;anglesValid=false;
+  if(mpuSetup()) fifoRestart();
+}
+// The bias is taken only from a still robot: per-axis noise SD under GYRO_STILL_SD raw
+// (normally ~2-5). A zero taken while the robot was handled gave a 30 deg/s yaw error.
+// Without a valid bias, frames keep accumulating and the robot zeroes itself once still.
+static const float GYRO_STILL_SD=25;
+static bool biasValid=false;
+static float zeroSum[3]={},zeroSquares[3]={};static uint16_t zeroFrames=0;
+static void zeroClear() { for(uint8_t a=0;a<3;++a) zeroSum[a]=zeroSquares[a]=0;zeroFrames=0; }
+static bool zeroFinish(bool automatic,bool overflowed) {
+  float mean[3],sd[3];bool still=zeroFrames>=core::MPU_ZERO_SAMPLES&&!overflowed;
+  for(uint8_t a=0;a<3;++a) {
+    mean[a]=zeroFrames?zeroSum[a]/zeroFrames:0;
+    sd[a]=zeroFrames?sqrt(max(0.0f,zeroSquares[a]/zeroFrames-mean[a]*mean[a])):0;
+    still=still&&sd[a]<GYRO_STILL_SD;
+  }
+  if(still) { for(uint8_t a=0;a<3;++a) { bias[a]=mean[a];biasSd[a]=sd[a];angle[a]=0; } biasValid=anglesValid=true; }
+  if(still||!automatic) { // Automatic attempts report only success, not every moving window.
+    out.print(F("{\"type\":\"gyro_zero\",\"auto\":"));out.print(automatic);
+    out.print(F(",\"frames\":"));out.print(zeroFrames);out.print(F(",\"bias_raw\":["));
+    for(uint8_t a=0;a<3;++a) { if(a) out.print(',');out.print(mean[a],2); }
+    out.print(F("],\"noise_sd_raw\":["));
+    for(uint8_t a=0;a<3;++a) { if(a) out.print(',');out.print(sd[a],2); }
+    out.print(F("],\"applied\":"));out.print(still);
+    out.println(still?F(",\"valid\":1}"):F(",\"valid\":0,\"note\":\"robot moving: zero rejected, retries by itself when still\"}"));
+  }
+  zeroClear();return still;
+}
+static void gyroService() {
+  wdt_reset();
+  if(!gyroRunning) return;
+  if(gyroQuiet&&motorsLive) { lastFrameMs=lastDrainMs=millis();return; }  // Not "stuck": just quiet.
+  if(gyroNeedsSetup||millis()-lastFrameMs>300) gyroConfigure();  // 200 Hz: 300 ms of nothing = stuck.
+  bool level=digitalRead(gyroInt);if(level&&!intLast) ++intRises;intLast=level;
+  uint32_t now=millis();
+  // Data-ready latches INT high; the timer path keeps draining if INT is miswired.
+  if(level&&now-lastDrainMs>=(stepKind==STEP_IDLE?20u:5u)) ++intDrains;  // Fresh yaw for step control.
+  else if(now-lastDrainMs>=(stepKind==STEP_IDLE?60u:10u)) ++timerDrains;
+  else return;
+  lastDrainMs=now;
+  if(biasValid) gyroDrain(0,0);
+  else { zeroFrames+=gyroDrain(zeroSum,zeroSquares);if(zeroFrames>=core::MPU_ZERO_SAMPLES) zeroFinish(true,false); }
+}
+// GYROZERO and boot: two seconds of frames, applied only if the robot was still.
+static void gyroZero() {
+  if(!gyroRunning) return;
+  zeroClear();fifoRestart();
+  uint32_t begin=millis();uint16_t before=overflows;
+  while(zeroFrames<core::MPU_ZERO_SAMPLES&&millis()-begin<3000) { wdt_reset();delay(20);zeroFrames+=gyroDrain(zeroSum,zeroSquares); }
+  zeroFinish(false,overflows!=before);
+}
+static void gyroBegin() {
+  gyroRunning=anglesValid=biasValid=false;gyroAddress=gyroWho=0;zeroClear();
+  pinMode(gyroInt,INPUT);
+  // The MPU keeps power through a Mega reset, so a chip left mid-transfer or scrambled
+  // can fail setup: retry after a bus recovery, each time with a full device reset.
+  for(uint8_t attempt=0;attempt<3&&!gyroRunning;++attempt) {
+    wdt_reset();
+    if(attempt) i2cRecover();
+    gyroAddress=0;
+    for(uint8_t address=0x68;address<=0x69&&!gyroAddress;++address)
+      if(reg(address,core::MPU_WHO_AM_I,&gyroWho,1)) gyroAddress=address;
+    gyroModel=gyroAddress?core::mpuModel(gyroWho):0;
+    if(!gyroModel) continue;
+    bool ok=gyroWrite(core::MPU_PWR_MGMT_1,0x80);delay(100); // Volatile device reset.
+    gyroRunning=mpuSetup()&&ok;
+  }
+  if(!gyroRunning) return;
+  delay(200); // Gyro start-up and DLPF settling before the bias window.
+  gyroZero();lastDrainMs=lastFrameMs=millis();
+}
+static void gyroReport() {
+  Serial.print(F("{\"bus\":\"D20/D21\",\"address\":"));if(gyroAddress) Serial.print(gyroAddress);else Serial.print(F("null"));
+  Serial.print(F(",\"whoami\":"));if(gyroAddress) Serial.print(gyroWho);else Serial.print(F("null"));
+  Serial.print(F(",\"model\":"));
+  if(gyroModel) { Serial.print('"');Serial.print(gyroModel);Serial.print('"'); } else Serial.print(F("null"));
+  Serial.print(F(",\"running\":"));Serial.print(gyroRunning);
+  Serial.print(F(",\"int_pin\":"));Serial.print(digitalRead(gyroInt));
+  if(gyroRunning) {
+    Serial.print(F(",\"gyro_raw\":["));
+    for(uint8_t axis=0;axis<3;++axis) { if(axis) Serial.print(',');Serial.print(lastRaw[axis]); }
+    Serial.print(F("],\"rate_dps\":["));
+    for(uint8_t axis=0;axis<3;++axis) {
+      if(axis) Serial.print(',');
+      Serial.print((lastRaw[axis]-bias[axis])/core::MPU_GYRO_LSB_PER_DPS,2);
+    }
+    Serial.print(F("],\"angle_deg\":["));
+    for(uint8_t axis=0;axis<3;++axis) { if(axis) Serial.print(',');Serial.print(angle[axis],2); }
+    Serial.print(F("],\"angles_valid\":"));Serial.print(anglesValid);
+    // Gravity shows which axis is vertical, i.e. which gyro axis measures yaw.
+    Serial.print(F(",\"accel_raw\":"));
+    if(accelOk) {
+      Serial.print('[');
+      for(uint8_t axis=0;axis<3;++axis) { if(axis) Serial.print(',');Serial.print(accelRaw[axis]); }
+      Serial.print(']');
+    } else Serial.print(F("null"));
+    Serial.print(F(",\"frames\":"));Serial.print(frames);
+    Serial.print(F(",\"int_rises\":"));Serial.print(intRises);
+    Serial.print(F(",\"int_drains\":"));Serial.print(intDrains);
+    Serial.print(F(",\"timer_drains\":"));Serial.print(timerDrains);
+    Serial.print(F(",\"overflows\":"));Serial.print(overflows);
+    Serial.print(F(",\"saturated\":"));Serial.print(saturated);
+  }
+  Serial.print(F(",\"bus_errors\":"));Serial.print(busErrors);
+  Serial.print(F(",\"i2c_timeouts\":"));Serial.print(i2cTimeouts);
+  Serial.print(F(",\"gyro_restarts\":"));Serial.print(gyroRestarts);
+  Serial.print(F(",\"gyro_resets\":"));Serial.print(gyroResets);
+  Serial.print(F(",\"bias_valid\":"));Serial.print(biasValid);
+  Serial.print('}');
+}
+static void readAccel() {
+  if(gyroQuiet&&motorsLive) return;
+  uint8_t accel[6];
+  accelOk=gyroRunning&&reg(gyroAddress,core::MPU_ACCEL_XOUT,accel,6);
+  if(gyroRunning&&!accelOk) ++busErrors;
+  for(uint8_t axis=0;axis<3&&accelOk;++axis) accelRaw[axis]=core::mpuWord(accel+axis*2);
+}
+template<typename T> static void list(Print& o,const T* v,uint8_t n,uint8_t digits=0) {
+  o.print('[');
+  for(uint8_t i=0;i<n;++i) { if(i) o.print(',');if(digits) o.print(float(v[i]),digits);else o.print(v[i]); }
+  o.print(']');
+}
+// Same keys as the USB sample, minus diagnostics-only fields: about 250 bytes.
+static void compactSample(Print& o,const uint16_t* adc,const int16_t* us,const uint16_t* rgbc) {
+  float rate[3];
+  for(uint8_t axis=0;axis<3;++axis) rate[axis]=(lastRaw[axis]-bias[axis])/core::MPU_GYRO_LSB_PER_DPS;
+  o.print(F("{\"type\":\"sample\",\"link\":\"bt\",\"ms\":"));o.print(millis());
+  o.print(F(",\"boot\":\""));o.print(bootCause);o.print('"');
+  o.print(F(",\"adc\":"));list(o,adc,4);
+  o.print(F(",\"ultrasonic_mm\":"));list(o,us,US_COUNT);
+  o.print(F(",\"gyro\":{\"model\":"));
+  if(gyroModel) { o.print('"');o.print(gyroModel);o.print('"'); } else o.print(F("null"));
+  if(gyroRunning) {
+    o.print(F(",\"angle_deg\":"));list(o,angle,3,1);
+    o.print(F(",\"rate_dps\":"));list(o,rate,3,1);
+    o.print(F(",\"angles_valid\":"));o.print(anglesValid);
+    if(accelOk) { o.print(F(",\"accel_raw\":"));list(o,accelRaw,3); }
+    o.print(F(",\"int_rises\":"));o.print(intRises);
+  }
+  o.print(F(",\"bus_errors\":"));o.print(busErrors);
+  o.print(F(",\"i2c_timeouts\":"));o.print(i2cTimeouts);o.print(F(",\"gyro_restarts\":"));o.print(gyroRestarts);
+  o.print(F(",\"gyro_resets\":"));o.print(gyroResets);o.print(F(",\"bias_valid\":"));o.print(biasValid);
+  o.print(F("},\"color_rgbc\":"));list(o,rgbc,4);o.print(F(",\"start_btn\":"));o.print(btnReport);o.print(F(",\"btn_pins\":"));o.print(btnPinsReport);o.print(F(",\"chk\":"));o.print(checkMask());ttReport(o);stepReport(o);o.println('}');
+}
+// Bluetooth's 9600 baud carries ~960 bytes/s: a full sample (~400 bytes) goes once a second
+// and this ~62-byte line fills the other four of five, so the console still updates at 5 Hz.
+// F,ms,adc x4,ultrasonic left/right/front,gyro Z angle,gyro Z rate,colour R,G,B,C
+static void fastSample(Print& o,const uint16_t* adc,const int16_t* us,const uint16_t* rgbc) {
+  o.print(F("F,"));o.print(millis());
+  for(uint8_t i=0;i<4;++i) { o.print(',');o.print(adc[i]); }
+  for(uint8_t i=0;i<US_COUNT;++i) { o.print(',');o.print(us[i]); }
+  o.print(',');o.print(angle[2],1);o.print(',');o.print((lastRaw[2]-bias[2])/core::MPU_GYRO_LSB_PER_DPS,1);
+  for(uint8_t i=0;i<4;++i) { o.print(',');o.print(rgbc[i]); }
+  o.print(',');o.print(btnReport);
+  o.println();
+}
+// ---- Tournament step tests ----------------------------------------------------------------
+// The console sends one step at a time with targets from the calibration captures. The loop
+// runs here: Bluetooth's 5 Hz data arrives 100-300 ms late, too late to stop a turn.
+// Ranges: 0 left 45, 1 right 45, 2 front, 3 left side, 4 right side.
+//   WMAP m s m s m s m s  wheel map from the console: motor 1-4 and forward sign, FL FR RL RR.
+//   REF front ls rs l45 r45  the recorded readings of the target checkpoint; 9999 = the capture
+//     had no steady reading there, so that sensor is not used.
+//   GO base creep probe maxpwm minpwm  drive until the readings match REF, in the robot's frame:
+//     the front sensor sets the distance, the side sensors the capture had set the sideways
+//     position. base 0 holds the current heading, 1 the stored reference heading. creep 1 lets
+//     the robot creep forward and centre on the 45s until its sensors reach the walls (start).
+//     probe 1 then fixes the heading from the recorded 45 readings: it turns +3 and -3 deg,
+//     measures how each beam changes per degree (wall geometry unknown) and corrects by
+//     (recorded - measured) / slope. On arrival the heading is stored as the reference.
+//   TURN deg maxpwm minpwm  gyro turn to the reference heading + deg (CCW +), or the current
+//     heading + deg if none is stored; stores that target as the reference.
+// Any stop, a 40 s (turn 10 s) timeout, lost sensors or an unzeroed gyro ends a step.
+static const float GYRO_SCALE=1.009f;         // Hand test 27 Oct: 4 x 90 deg left read 357.4.
+static const float STEP_X_FULL_MM=250,STEP_Y_FULL_MM=150,STEP_YAW_FULL_DEG=25;
+static const float STEP_BRAKE_S=0.06f;         // Cut power this long before reaching a heading.
+static const float STEP_UNKNOWN=9999;          // Error not measured yet.
+static const int16_t STEP_NO_REF=9999;         // Reference the capture did not have.
+static const float PROBE_DEG=3,PROBE_MAX_FIX_DEG=8,PROBE_MIN_SLOPE=3; // slope in mm per deg
+// Closer than this the beam cone (+/-7.5 deg) finds the same nearest surface whichever way it
+// points (e.g. both 45s ~150 mm in a parking corner): no heading information, so not probed.
+static const int16_t PROBE_MIN_RANGE_MM=200;
+static const uint8_t GO_POS=0,GO_PLUS=1,GO_MINUS=2,GO_ZERO=3,GO_FINAL=4;
+static int16_t usLatest[US_COUNT]={-1,-1,-1,-1,-1};static uint16_t usSeq=0; // Set by sample().
+static int8_t wheelMotor[4]={-1,-1,-1,-1},wheelSign[4]={};
+static int16_t ref[US_COUNT]={STEP_NO_REF,STEP_NO_REF,STEP_NO_REF,STEP_NO_REF,STEP_NO_REF}; // l45 r45 front ls rs
+static bool refYawValid=false,goCreep=false,goProbe=false;
+static int16_t stepMaxPwm=0,stepMinPwm=0;
+static uint8_t goPhase=GO_POS,probesDone=0,probeReads=0;
+static float yawTarget=0,refYaw=0,stepEx=0,stepEy=0,goUx=0,goUy=0,probeBase=0,probeFix=0;
+static float probeSum[3][2]={},probeN[3][2]={};  // phase PLUS/MINUS/ZERO x beam L/R
+static uint32_t stepStartMs=0,stepCtrlMs=0,stepSettledMs=0,stepSensorsOkMs=0;static uint16_t stepUsSeen=0;
+static float yawDeg() { return -angle[2]*GYRO_SCALE; }  // CCW positive: the chip's Z points down.
+static float yawRateDps() { return -(lastRaw[2]-bias[2])/core::MPU_GYRO_LSB_PER_DPS*GYRO_SCALE; }
+static bool hasRef(uint8_t i) { return ref[i]!=STEP_NO_REF; }
+static bool probeBeam(uint8_t b) { return hasRef(b)&&ref[b]>=PROBE_MIN_RANGE_MM; }
+static bool parseInts(const char* text,int16_t* v,uint8_t n) {
+  for(uint8_t i=0;i<n;++i) {
+    char* end;long value=strtol(text,&end,10);
+    if(end==text||value<-9999||value>9999) return false;
+    v[i]=value;text=end;
+  }
+  while(*text==' ') ++text;
+  return !*text;
+}
+// Mecanum mix, inputs -1..1: ux forward, uy left, uw CCW. A wheel under 3 % stays off; the
+// rest map onto minpwm..maxpwm so small corrections still beat friction. All off = hard stop.
+static void driveMix(float ux,float uy,float uw) {
+  float wheel[4]={ux-uy-uw,ux+uy+uw,ux+uy-uw,ux-uy+uw},peak=1;  // FL FR RL RR
+  for(float w:wheel) peak=max(peak,fabsf(w));
+  int16_t raw[4]={};bool any=false;
+  for(uint8_t p=0;p<4;++p) {
+    float u=wheel[p]/peak;
+    if(fabsf(u)<0.03f) continue;
+    int16_t pwm=int16_t(stepMinPwm+(stepMaxPwm-stepMinPwm)*fabsf(u));
+    raw[wheelMotor[p]]+=wheelSign[p]*(u>0?pwm:-pwm);any=true;
+  }
+  if(!any) { haltMotors();return; }
+  for(uint8_t m=0;m<4;++m) setMotor(m,raw[m]);
+  motorsLive=true;spinning=-1;motorDeadline=millis()+DRIVE_WATCHDOG_MS;
+}
+static void stepEnd(bool reached,const __FlashStringHelper* reason) {
+  haltMotors();
+  if(reached) { refYaw=stepKind==STEP_TURN?yawTarget:yawDeg();refYawValid=true; }
+  out.print(F("{\"type\":\"step_end\",\"kind\":\""));out.print(stepKind==STEP_TURN?F("turn"):F("go"));
+  out.print(F("\",\"result\":\""));out.print(reached?F("reached"):F("aborted"));
+  out.print(F("\",\"reason\":\""));out.print(reason);
+  out.print(F("\",\"ex_mm\":"));out.print(stepEx,0);out.print(F(",\"ey_mm\":"));out.print(stepEy,0);
+  out.print(F(",\"probes\":"));out.print(probesDone);out.print(F(",\"probe_fix_deg\":"));out.print(probeFix,2);
+  out.print(F(",\"yaw_err_deg\":"));out.print(yawTarget-yawDeg(),2);out.print(F(",\"yaw_deg\":"));out.print(yawDeg(),2);
+  out.print(F(",\"ref_heading\":"));out.print(refYawValid);out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+  stepKind=STEP_IDLE;
+}
+static bool stepBegin(uint8_t kind,int16_t maxPwm,int16_t minPwm) {
+  if(wheelMotor[0]<0) { out.println(F("{\"error\":\"STEP_NEEDS_WMAP\"}"));return false; }
+  if(!gyroRunning||!biasValid) { out.println(F("{\"error\":\"STEP_NEEDS_ZEROED_GYRO\"}"));return false; }
+  stepKind=kind;stepMaxPwm=constrain(maxPwm,40,int16_t(DRIVE_PWM_MAX));stepMinPwm=constrain(minPwm,0,stepMaxPwm);
+  stepStartMs=stepCtrlMs=stepSensorsOkMs=millis();stepSettledMs=0;stepUsSeen=usSeq;
+  stepEx=stepEy=STEP_UNKNOWN;goUx=goUy=0;goPhase=GO_POS;probesDone=0;probeFix=0;
+  return true;
+}
+static void stepStarted() {
+  out.print(F("{\"type\":\"step_start\",\"kind\":\""));out.print(stepKind==STEP_TURN?F("turn"):F("go"));
+  out.print(F("\",\"yaw_target_deg\":"));out.print(yawTarget,2);out.print(F(",\"ref_heading\":"));out.print(refYawValid);
+  out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+}
+// New ranges: position errors and translation commands, in the robot's frame.
+static void goUpdate(uint32_t now) {
+  int16_t l45=usLatest[0],r45=usLatest[1],front=usLatest[2],ls=usLatest[3],rs=usLatest[4];
+  bool okX=hasRef(2)&&front>0;
+  stepEx=okX?front-ref[2]:STEP_UNKNOWN;                                 // + = drive forward
+  // Sideways (+ = strafe left) from exactly the side sensors the capture had, once all see a wall.
+  bool okY=true;
+  if(hasRef(3)&&hasRef(4)) { if(ls>0&&rs>0) stepEy=((ls-rs)-(ref[3]-ref[4]))*0.5f;else okY=false; }
+  else if(hasRef(4)) { if(rs>0) stepEy=ref[4]-rs;else okY=false; }
+  else if(hasRef(3)) { if(ls>0) stepEy=ls-ref[3];else okY=false; }
+  else okY=false;
+  // Starting out, before a side wall is in range: centre on the 45 pair (beams on the side walls).
+  if(!okY&&goCreep&&hasRef(0)&&hasRef(1)&&l45>0&&r45>0) { stepEy=((l45-r45)-(ref[0]-ref[1]))*0.354f;okY=true; }
+  if(!okY) stepEy=STEP_UNKNOWN;
+  if(okX) stepSensorsOkMs=now;
+  goUx=okX?(fabsf(stepEx)>12?constrain(stepEx/STEP_X_FULL_MM,-1.0f,1.0f):0):(goCreep?0.3f:0);
+  goUy=okY&&fabsf(stepEy)>8?constrain(stepEy/STEP_Y_FULL_MM,-1.0f,1.0f):0;
+  if(front>0&&goUx>0&&(front<30||(okX&&front<ref[2]-20))) goUx=0;    // Never past the target into a wall.
+}
+static bool positionSettled() {
+  bool lateral=hasRef(3)||hasRef(4);
+  return goUx==0&&goUy==0&&fabsf(stepEx)<15&&(!lateral||fabsf(stepEy)<10);
+}
+// Heading probe: average two fresh 45 readings per probe heading, then fit the slopes.
+static void probeNext() {
+  if(goPhase==GO_PLUS) { yawTarget=probeBase-PROBE_DEG;goPhase=GO_MINUS;return; }
+  if(goPhase==GO_MINUS) { yawTarget=probeBase;goPhase=GO_ZERO;return; }
+  float fix=0,weight=0;
+  out.print(F("{\"type\":\"step_probe\",\"slope_mm_per_deg\":["));
+  for(uint8_t b=0;b<2;++b) {
+    bool ok=probeBeam(b)&&probeN[0][b]&&probeN[1][b]&&probeN[2][b];
+    float slope=ok?(probeSum[0][b]/probeN[0][b]-probeSum[1][b]/probeN[1][b])/(2*PROBE_DEG):0;
+    if(b) out.print(',');
+    out.print(slope,1);
+    if(ok&&fabsf(slope)>=PROBE_MIN_SLOPE) { fix+=(ref[b]-probeSum[2][b]/probeN[2][b])/slope;weight+=1; }
+  }
+  probeFix=weight?constrain(fix/weight,-PROBE_MAX_FIX_DEG,PROBE_MAX_FIX_DEG):0;
+  ++probesDone;yawTarget=probeBase+probeFix;
+  out.print(F("],\"fix_deg\":"));out.print(probeFix,2);out.print(F(",\"beams\":"));out.print(int(weight));out.println('}');
+  goPhase=fabsf(probeFix)>2&&probesDone<2?GO_POS:GO_FINAL;  // Re-centre; probe again after a big fix.
+}
+static void stepService() {
+  if(stepKind==STEP_IDLE) return;
+  uint32_t now=millis();
+  if(now-stepCtrlMs<5) return;  // At minimum power the robot still turns ~1 deg per 20 ms.
+  stepCtrlMs=now;
+  if(now-stepStartMs>(stepKind==STEP_TURN?10000UL:40000UL)) { stepEnd(false,F("timeout"));return; }
+  if(!gyroRunning||!biasValid) { stepEnd(false,F("gyro_not_ready"));return; }
+  float eYaw=yawTarget-yawDeg(),rate=yawRateDps();
+  bool coast=eYaw*rate>0&&fabsf(eYaw)<fabsf(rate)*STEP_BRAKE_S;  // Momentum covers the rest.
+  bool headingStill=fabsf(eYaw)<0.6f&&fabsf(rate)<2;
+  float uw=headingStill||coast?0:constrain(eYaw/STEP_YAW_FULL_DEG,-1.0f,1.0f);
+  bool fresh=usSeq!=stepUsSeen;stepUsSeen=usSeq;
+  if(stepKind==STEP_TURN) {  // Slows inside 25 deg; done after 400 ms within 0.6 deg and still.
+    driveMix(0,0,uw);
+    if(headingStill) { if(!stepSettledMs) stepSettledMs=now;else if(now-stepSettledMs>=400) stepEnd(true,F("reached")); }
+    else stepSettledMs=0;
+    return;
+  }
+  if(fresh) goUpdate(now);
+  if(now-stepSensorsOkMs>(goCreep?6000UL:1500UL)) { stepEnd(false,F("sensors_lost"));return; }
+  if(goPhase==GO_PLUS||goPhase==GO_MINUS||goPhase==GO_ZERO) {  // Turning in place only.
+    driveMix(0,0,uw);
+    if(!headingStill) { stepSettledMs=0;return; }
+    if(!stepSettledMs) { stepSettledMs=now;probeReads=0;return; }
+    if(now-stepSettledMs<200||!fresh) return;   // Let the heading settle; ranges taken after.
+    uint8_t p=goPhase-GO_PLUS;
+    if(!probeReads) for(uint8_t b=0;b<2;++b) probeSum[p][b]=probeN[p][b]=0;
+    for(uint8_t b=0;b<2;++b) if(usLatest[b]>0) { probeSum[p][b]+=usLatest[b];probeN[p][b]+=1; }
+    if(++probeReads>=2) { stepSettledMs=0;probeNext(); }
+    return;
+  }
+  driveMix(goUx,goUy,fabsf(eYaw)<0.8f||coast?0:constrain(eYaw/STEP_YAW_FULL_DEG,-1.0f,1.0f));
+  if(positionSettled()&&fabsf(eYaw)<1.5f) {
+    if(!stepSettledMs) { stepSettledMs=now;return; }
+    if(now-stepSettledMs<600) return;
+    stepSettledMs=0;
+    if(goPhase==GO_POS&&goProbe&&(probeBeam(0)||probeBeam(1))) { probeBase=yawTarget;yawTarget=probeBase+PROBE_DEG;goPhase=GO_PLUS; }
+    else stepEnd(true,F("reached"));
+  } else stepSettledMs=0;
+}
+static void stepReport(Print& o) {
+  o.print(F(",\"step\":{\"kind\":\""));o.print(stepKind==STEP_GO?F("go"):stepKind==STEP_TURN?F("turn"):F("idle"));
+  o.print(F("\",\"phase\":"));o.print(goPhase);o.print(F(",\"ref_heading\":"));o.print(refYawValid);
+  o.print(F(",\"yaw_deg\":"));o.print(yawDeg(),1);o.print('}');
+}
+// A scrambled MPU (a write corrupted by noise) reads a wrong ID or impossible gravity, such
+// as -32768 on every accel axis, while the bus itself works; only a full device reset cures
+// it. Two bad checks in a row (0.5 s) trigger one. The bias belongs to the chip and is kept.
+static uint8_t gyroBadChecks=0;
+static void gyroHealth() {
+  if(!gyroRunning||(gyroQuiet&&motorsLive)) return;
+  const float LSB_PER_G=16384;  // ACCEL_CONFIG is left at its reset value, +/-2 g.
+  float g2=0;for(uint8_t a=0;a<3;++a) g2+=float(accelRaw[a])*accelRaw[a];
+  uint8_t who=0;
+  bool healthy=reg(gyroAddress,core::MPU_WHO_AM_I,&who,1)&&who==gyroWho&&accelOk&&
+    g2>sq(0.5f*LSB_PER_G)&&g2<sq(1.6f*LSB_PER_G);
+  if(healthy) { gyroBadChecks=0;return; }
+  if(++gyroBadChecks<2) return;
+  gyroBadChecks=0;++gyroResets;anglesValid=false;
+  gyroWrite(core::MPU_PWR_MGMT_1,0x80);wdt_reset();delay(100);
+  if(mpuSetup()) fifoRestart();
+  lastFrameMs=millis();
+}
+static void service(); // Commands, motor watchdog and gyro, also called mid-sample.
+static bool sampling=false;
+static uint16_t rgbc[4]={};   // Latest colour R, G, B, clear (sample(); the run reads it too).
+static void sample() {
+  if(sampling) return;
+  sampling=true;
+  uint32_t cycleStart=millis();
+  btnPinsReport=btnSeenMask|btnMask();btnSeenMask=0;btnReport=btnPinsReport!=0;
+  if(!motorsLive) inhibitMotors();
+  uint16_t value[4]={};
+  for(uint8_t i=0;i<4;++i) { analogRead(light[i]);for(uint8_t n=0;n<16;++n) value[i]+=analogRead(light[i]);value[i]=(value[i]+8)/16; }
+  int16_t us[US_COUNT];
+  for(uint8_t i=0;i<US_COUNT;++i) {
+    if(i) for(uint32_t t=millis();millis()-t<15;) service();
+    us[PING_ORDER[i]]=range(PING_ORDER[i]);
+  }
+  for(uint8_t i=0;i<US_COUNT;++i) { usLatest[i]=us[i];if(us[i]>0) usSeenAt[i]=millis(); }
+  for(uint8_t i=0;i<4;++i) ldrOk[i]=value[i]>=10&&value[i]<=1010;
+  ++usSeq;service();
+  // Channels R, G, B, clear; 3 ms filter settling, then 96 bursts (6.912 ms exposure).
+  // Skipped during a step so ranges update faster; the last reading is repeated.
+  for(uint8_t channel=0;stepKind==STEP_IDLE&&channel<4;++channel) {
+    if(!channel) for(uint16_t& c:rgbc) c=0;
+    digitalWrite(colorS2,core::frequencyS2(channel)?HIGH:LOW);
+    digitalWrite(colorS3,core::frequencyS3(channel)?HIGH:LOW);
+    delay(3);
+    for(uint16_t burst=0;burst<core::COLOR_MIN_BURSTS;++burst) {
+      uint8_t status=SREG;cli();uint8_t count=colorPulseBurst();SREG=status;
+      rgbc[channel]+=count;delayMicroseconds((burst*13U)&31U);
+    }
+    service();
+  }
+  if(stepKind==STEP_IDLE) clrOk=rgbc[0]>0&&rgbc[1]>0&&rgbc[2]>0;
+  Serial.print(F("{\"type\":\"sample\",\"ms\":"));Serial.print(millis());
+  Serial.print(F(",\"boot\":\""));Serial.print(bootCause);Serial.print('"');
+  Serial.print(F(",\"motors\":\"PWM_LOW\",\"light_pins\":[\"A0\",\"A7\",\"A2\",\"A6\"],\"adc\":["));
+  for(uint8_t i=0;i<4;++i) { if(i) Serial.print(',');Serial.print(value[i]); }
+  Serial.print(F("],\"ultrasonic_mm\":"));list(Serial,us,US_COUNT);
+  Serial.print(F(",\"gyro\":"));gyroService();readAccel();gyroReport(); // No output mid-line.
+  Serial.print(F(",\"start_btn\":"));Serial.print(btnReport);Serial.print(F(",\"btn_pins\":"));Serial.print(btnPinsReport);
+  Serial.print(F(",\"chk\":"));Serial.print(checkMask());
+  Serial.print(F(",\"color_out_pin\":32,\"color_rgbc\":["));
+  for(uint8_t i=0;i<4;++i) { if(i) Serial.print(',');Serial.print(rgbc[i]); }
+  Serial.print(']');
+  ttReport(Serial);stepReport(Serial);
+  Serial.print(F(",\"color_exposure_cycles\":"));Serial.print(uint32_t(core::COLOR_MIN_BURSTS)*core::COLOR_BURST_CYCLES);
+  Serial.print(F(",\"color_filters\":\"DRIVEN_20PCT\",\"cycle_ms\":"));Serial.print(millis()-cycleStart);Serial.println('}');
+  static uint32_t lastBtMs=0;  // Steps sample at 10 Hz; Bluetooth stays at 5 Hz, its limit.
+  if(btHostPresent()&&millis()-lastBtMs>=190) { lastBtMs=millis();if(++sampleCount%5==0) compactSample(Serial3,value,us,rgbc);else fastSample(Serial3,value,us,rgbc); }
+  gyroHealth();
+  sampling=false;
+}
+// USB only: send AT text to the Bluetooth module (works only while no device is
+// connected over Bluetooth) and report its raw reply. "BTAT x" sends x bare,
+// "BTATN x" appends CRLF; module families differ in which they expect.
+static void btAt(const char* text,bool crlf) {
+  // An unconnected module parses everything it receives as AT input, so samples
+  // must not interleave with configuration: pause them for 15 s after each AT.
+  btQuietUntil=millis()+15000;Serial3.flush();delay(300);
+  while(Serial3.available()) Serial3.read();
+  Serial3.print(text);if(crlf) Serial3.print(F("\r\n"));
+  char reply[64];uint8_t n=0;uint32_t start=millis();
+  while(millis()-start<3000) {
+    gyroService();
+    while(Serial3.available()) { char c=Serial3.read();if(n<sizeof(reply)-1&&c>=32&&c<127&&c!='"'&&c!='\\') reply[n++]=c;else if(n<sizeof(reply)-1&&(c=='\r'||c=='\n')) reply[n++]='|'; }
+  }
+  reply[n]=0;btQuietUntil=millis()+15000;
+  Serial.print(F("{\"type\":\"bt_at\",\"sent\":\""));Serial.print(text);
+  Serial.print(F("\",\"crlf\":"));Serial.print(crlf);
+  Serial.print(F(",\"reply\":\""));Serial.print(reply);Serial.println(F("\"}"));
+}
+// One timed mecanum move: x forward, y left, w CCW, each -100..100, mixed like the step controller
+// and scaled so the busiest wheel gets pwm; stops by itself after ms (pulse_done). Needs a wheel map.
+static const int16_t WHEEL_MIN_PWM=30;
+static bool applyMix(int16_t x,int16_t y,int16_t w,int16_t p) {
+  if(abs(x)>100||abs(y)>100||abs(w)>100||p<30||p>int16_t(DRIVE_PWM_MAX)) {
+    out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return false;
+  }
+  if(wheelMotor[0]<0) { out.println(F("{\"error\":\"PULSE_NEEDS_WMAP\"}"));return false; }
+  float wheel[4]={float(x-y-w),float(x+y+w),float(x+y-w),float(x-y+w)},peak=0;  // FL FR RL RR
+  for(float v:wheel) peak=max(peak,fabsf(v));
+  if(peak<1) { out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return false; }
+  // Every turning wheel gets at least WHEEL_MIN_PWM (about where a loaded wheel starts to turn) plus a
+  // linear share, so wheel speed stays proportional to the mix: the slow wheels of a diagonal move no
+  // longer stall and the robot goes the commanded direction (2 Nov: it went forward, then sideways).
+  // Pure forward, strafe and turn moves (all wheels equal) are unchanged.
+  int16_t raw[4]={};
+  for(uint8_t q=0;q<4;++q) {
+    float u=wheel[q]/peak;
+    if(fabsf(u)<0.05f) continue;
+    int16_t mag=p>WHEEL_MIN_PWM?int16_t(WHEEL_MIN_PWM+(p-WHEEL_MIN_PWM)*fabsf(u)):int16_t(p*fabsf(u));
+    raw[wheelMotor[q]]=wheelSign[q]*(u>0?mag:-mag);
+  }
+  for(uint8_t m=0;m<4;++m) setMotor(m,raw[m]);
+  return true;
+}
+static bool startPulse(int16_t x,int16_t y,int16_t w,int16_t p,int16_t ms) {
+  stopMotors();
+  if(ms<10||ms>1500) { out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return false; }
+  if(!applyMix(x,y,w,p)) return false;
+  motorsLive=true;pulsing=true;motorDeadline=millis()+ms;
+  out.print(F("{\"type\":\"pulse_start\",\"ms\":"));out.print(millis());out.println('}');
+  return true;
+}
+// Tournament calibration, kept in EEPROM so the run needs no computer: the six checkpoints'
+// readings, the colour references and the wheel map. Stored near the top of the EEPROM, clear of
+// the competition firmware's two ~580-byte slots at address 0, with a CRC.
+//   CAL p f ls rs l45 r45   checkpoint p (0 P, 1 N, 2 N turned left, 3 left box, 4 N turned
+//                           right, 5 right box) in REF order; 9999 = not a target
+//   CALRG g r               colour red/green ratio x 1000 for green and red paper
+//   CALSAVE                 store those and the current wheel map (WMAP); CALSHOW prints them
+struct StoredCal { uint16_t magic;uint8_t version;int8_t wmotor[4],wsign[4];rl::Calib cal;uint16_t crc; };
+static const int CAL_ADDRESS=3968;
+static const uint16_t CAL_MAGIC=0x4e52;   // "NR"
+static_assert(CAL_ADDRESS+sizeof(StoredCal)<=4096,"Run calibration must fit the Mega EEPROM");
+static rl::Calib calRam;static bool calValid=false;
+static uint16_t calCrc(const StoredCal& c) {
+  uint16_t crc=0xffff;const uint8_t* b=reinterpret_cast<const uint8_t*>(&c);
+  for(size_t i=0;i<offsetof(StoredCal,crc);++i) { crc^=b[i];for(uint8_t k=0;k<8;++k) crc=(crc>>1)^((crc&1)?0xa001:0); }
+  return crc;
+}
+static void calLoad() {
+  StoredCal c;EEPROM.get(CAL_ADDRESS,c);
+  calValid=c.magic==CAL_MAGIC&&c.version==1&&c.crc==calCrc(c);
+  if(!calValid) return;
+  calRam=c.cal;
+  for(uint8_t i=0;i<4;++i) { wheelMotor[i]=c.wmotor[i];wheelSign[i]=c.wsign[i]; }
+}
+static void calShow() {
+  out.print(F("{\"type\":\"cal\",\"valid\":"));out.print(calValid);
+  out.print(F(",\"wmap\":["));
+  for(uint8_t i=0;i<4;++i) { if(i) out.print(',');out.print(wheelMotor[i]+1);out.print(',');out.print(wheelSign[i]); }
+  out.print(F("],\"rg_milli\":["));out.print(calRam.greenMilli);out.print(',');out.print(calRam.redMilli);
+  out.print(F("],\"ref\":["));
+  const uint8_t order[5]={2,3,4,0,1};   // REF order: front ls rs l45 r45
+  for(uint8_t p=0;p<rl::NPOSE;++p) {
+    out.print(p?F(",["):F("["));
+    for(uint8_t i=0;i<5;++i) { if(i) out.print(',');out.print(calRam.ref[p][order[i]]); }
+    out.print(']');
+  }
+  out.println(F("]}"));
+}
+static bool calCommand(const char* line) {
+  int16_t v[6];
+  if(!strncmp(line,"CAL ",4)) {
+    if(!parseInts(line+4,v,6)||v[0]<0||v[0]>=rl::NPOSE) { out.println(F("{\"error\":\"BAD_CAL\"}"));return true; }
+    const uint8_t order[5]={2,3,4,0,1};
+    for(uint8_t i=0;i<5;++i) calRam.ref[v[0]][order[i]]=v[i+1]>0?v[i+1]:rl::NONE;
+    out.print(F("{\"type\":\"cal_set\",\"pose\":"));out.print(v[0]);out.println('}');
+    return true;
+  }
+  if(!strncmp(line,"CALRG ",6)) {
+    if(!parseInts(line+6,v,2)||v[0]<100||v[1]<=v[0]) { out.println(F("{\"error\":\"BAD_CALRG\"}"));return true; }
+    calRam.greenMilli=v[0];calRam.redMilli=v[1];
+    out.println(F("{\"type\":\"cal_rg\"}"));
+    return true;
+  }
+  if(!strcmp(line,"CALSAVE")) {
+    if(wheelMotor[0]<0) { out.println(F("{\"error\":\"CALSAVE_NEEDS_WMAP\"}"));return true; }
+    StoredCal c;c.magic=CAL_MAGIC;c.version=1;c.cal=calRam;
+    for(uint8_t i=0;i<4;++i) { c.wmotor[i]=wheelMotor[i];c.wsign[i]=wheelSign[i]; }
+    c.crc=calCrc(c);EEPROM.put(CAL_ADDRESS,c);
+    calLoad();calShow();
+    return true;
+  }
+  if(!strcmp(line,"CALSHOW")) { calShow();return true; }
+  return false;
+}
+static void command(const char* line,bool usb) {
+  if(!strcmp(line,"PING")) { if(!usb) { btPinged=true;btPingMs=millis(); } return; }
+  if(runActive&&strcmp(line,"STOP")&&strcmp(line,"STATUS")&&strcmp(line,"CALSHOW")) {
+    out.println(F("{\"error\":\"RUN_ACTIVE_SEND_STOP\"}"));return;
+  }
+  if(usb&&!strcmp(line,"HANGTEST")) { // Proves the watchdog: freeze; expect a fresh "ready".
+    stopMotors();Serial.println(F("{\"type\":\"hangtest\",\"expect\":\"reset within ~1 s\"}"));Serial.flush();
+    for(;;) {}
+  }
+  if(usb&&!strncmp(line,"BTATN ",6)) { btAt(line+6,true);return; }
+  if(usb&&!strncmp(line,"BTAT ",5)) { btAt(line+5,false);return; }
+  if(!strncmp(line,"SPIN ",5)&&line[5]>='1'&&line[5]<='4'&&line[6]==' '&&(line[7]=='+'||line[7]=='-')&&!line[8]) {
+    stopMotors();
+    uint8_t m=line[5]-'1';bool positive=line[7]=='+';
+    setMotor(m,positive?SPIN_PWM:-int16_t(SPIN_PWM));
+    motorsLive=true;spinning=m;motorDeadline=millis()+SPIN_MS;
+    out.print(F("{\"type\":\"spin\",\"motor\":"));out.print(m+1);
+    out.print(F(",\"dir\":\""));out.print(line[7]);out.print(F("\",\"pwm\":"));out.print(SPIN_PWM);
+    out.print(F(",\"ms\":"));out.print(SPIN_MS);out.println('}');
+    return;
+  }
+  if(!strncmp(line,"WMAP ",5)) {
+    int16_t v[8];bool ok=parseInts(line+5,v,8);uint8_t used=0;
+    for(uint8_t p=0;ok&&p<4;++p) { ok=v[2*p]>=1&&v[2*p]<=4&&(v[2*p+1]==1||v[2*p+1]==-1)&&!(used&(1<<v[2*p]));used|=1<<v[2*p]; }
+    if(!ok) { out.println(F("{\"error\":\"BAD_WMAP\"}"));return; }
+    for(uint8_t p=0;p<4;++p) { wheelMotor[p]=v[2*p]-1;wheelSign[p]=v[2*p+1]; }
+    out.println(F("{\"type\":\"wmap\",\"ok\":1}"));
+    return;
+  }
+  if(!strncmp(line,"REF ",4)) {
+    int16_t v[5];
+    if(!parseInts(line+4,v,5)) { out.println(F("{\"error\":\"BAD_REF\"}"));return; }
+    const uint8_t order[5]={2,3,4,0,1};  // front ls rs l45 r45 -> range indices
+    for(uint8_t i=0;i<5;++i) ref[order[i]]=v[i]>0?v[i]:STEP_NO_REF;
+    out.println(F("{\"type\":\"ref\",\"ok\":1}"));
+    return;
+  }
+  if(!strncmp(line,"GO ",3)) {
+    int16_t v[5];stopMotors();
+    if(!parseInts(line+3,v,5)||v[0]<0||v[0]>1||v[1]<0||v[1]>1||v[2]<0||v[2]>1) { out.println(F("{\"error\":\"BAD_GO_STOPPED\"}"));return; }
+    if(!hasRef(2)&&!v[1]) { out.println(F("{\"error\":\"GO_NEEDS_FRONT_REF\"}"));return; }
+    if(!stepBegin(STEP_GO,v[3],v[4])) return;
+    goCreep=v[1];goProbe=v[2];
+    yawTarget=v[0]&&refYawValid?refYaw:yawDeg();
+    stepStarted();
+    return;
+  }
+  if(!strncmp(line,"TURN ",5)) {
+    int16_t v[3];stopMotors();
+    if(!parseInts(line+5,v,3)||v[0]<-180||v[0]>180) { out.println(F("{\"error\":\"BAD_TURN_STOPPED\"}"));return; }
+    if(!stepBegin(STEP_TURN,v[1],v[2])) return;
+    yawTarget=(refYawValid?refYaw:yawDeg())+v[0];
+    stepStarted();
+    return;
+  }
+  if(!strncmp(line,"TURNTEST ",9)) {
+    int16_t v[4];stopMotors();
+    if(!parseDrive(line+9,v)||!(v[0]|v[1]|v[2]|v[3])) { out.println(F("{\"error\":\"BAD_TURNTEST_STOPPED\"}"));return; }
+    if(!gyroRunning) { out.println(F("{\"error\":\"TURNTEST_NEEDS_GYRO\"}"));return; }
+    for(uint8_t m=0;m<4;++m) ttPwm[m]=v[m];
+    ttLeg=0;ttLegsDone=0;ttState=TT_RUNNING;ttStartLeg();
+    out.print(F("{\"type\":\"turntest_start\",\"legs\":"));out.print(TT_LEGS);
+    out.print(F(",\"deg\":"));out.print(TT_DEG,0);out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+    return;
+  }
+  // "PULSE x y w pwm ms": one timed move for the ultrasonic-only stop-and-go controller. x forward,
+  // y left, w CCW, each -100..100 (mixed like the step controller, scaled so the busiest wheel gets
+  // pwm); stops by itself after ms and reports pulse_done. Needs WMAP; no gyro involved.
+  if(!strncmp(line,"PULSE ",6)) {
+    int16_t v[5];stopMotors();
+    if(!parseInts(line+6,v,5)) { out.println(F("{\"error\":\"BAD_PULSE_STOPPED\"}"));return; }
+    startPulse(v[0],v[1],v[2],v[3],v[4]);
+    return;
+  }
+  if(calCommand(line)) return;
+  if(!strcmp(line,"AUTORUN ON")||!strcmp(line,"AUTORUN OFF")) {
+    bool on=line[9]=='N';
+    if(on&&!calValid) { out.println(F("{\"error\":\"AUTORUN_NEEDS_CALSAVE\"}"));return; }
+    EEPROM.update(AUTORUN_ADDRESS,on?AUTORUN_MAGIC:0);
+    out.print(F("{\"type\":\"autorun\",\"armed\":"));out.print(on);out.println('}');
+    return;
+  }
+  if(!strncmp(line,"CREEP ",6)) {
+    int16_t v[1];
+    if(!parseInts(line+6,v,1)||v[0]<40||v[0]>600) { out.println(F("{\"error\":\"BAD_CREEP\"}"));return; }
+    if(notReady()) { out.println(F("{\"error\":\"CREEP_NOT_READY\"}"));return; }
+    creepTestTarget=v[0];runRequested=true;
+    out.print(F("{\"type\":\"creep_accepted\",\"target\":"));out.print(creepTestTarget);out.println('}');
+    return;
+  }
+  if(!strcmp(line,"RUN")||!strncmp(line,"RUN ",4)) {
+    int16_t v[3]={1,4,0};
+    if(line[3]&&!parseInts(line+4,v,2)&&!parseInts(line+4,v,3)) { out.println(F("{\"error\":\"BAD_RUN\"}"));return; }
+    if(!calValid) { out.println(F("{\"error\":\"RUN_NEEDS_CALSAVE\"}"));return; }
+    if(v[0]<1||v[1]>4||v[0]>v[1]||v[2]<-1||v[2]>1) { out.println(F("{\"error\":\"BAD_RUN\"}"));return; }
+    runFirst=v[0];runLast=v[1];runForceTurn=v[2];runRequested=true;
+    out.print(F("{\"type\":\"run_accepted\",\"first\":"));out.print(runFirst);out.print(F(",\"last\":"));out.print(runLast);out.println('}');
+    return;
+  }
+  // "NOGYRO": stop all gyro I2C traffic (motor noise corrupts it); GYROINIT turns it back on.
+  if(!strcmp(line,"NOGYRO")) { gyroRunning=false;anglesValid=false;out.println(F("{\"type\":\"nogyro\"}"));return; }
+  if(!strcmp(line,"QUIETGYRO")) {
+    gyroQuiet=true;if(!gyroRunning) gyroBegin();
+    out.print(F("{\"type\":\"quietgyro\",\"running\":"));out.print(gyroRunning);
+    out.print(F(",\"bias_valid\":"));out.print(biasValid);out.println('}');
+    return;
+  }
+  if(!strncmp(line,"MOT ",4)) {
+    int16_t v[4];
+    if(!parseDrive(line+4,v)) { stopMotors();out.println(F("{\"error\":\"BAD_MOT_STOPPED\"}"));return; }
+    if(spinning>=0||ttLeg>=0||stepKind!=STEP_IDLE) stopMotors(); // Manual drive cancels a test or step.
+    for(uint8_t m=0;m<4;++m) setMotor(m,v[m]);
+    motorsLive=true;motorDeadline=millis()+DRIVE_WATCHDOG_MS;
+    return;
+  }
+  if(!strcmp(line,"STOP")) { stopMotors();runStop=runActive;autorunCancel(F("stop"));out.println(F("{\"type\":\"stop\",\"motors\":\"PWM_LOW\"}")); }
+  else if(!strcmp(line,"PROBE")) scan();
+  else if(!strcmp(line,"STATUS")) sample();
+  else if(!strcmp(line,"GYROZERO")) gyroZero();
+  else if(!strcmp(line,"ENC")) encShow();
+  else if(!strcmp(line,"GYROINIT")) { gyroBegin();scan(); }
+  else if(!strcmp(line,"HEADING0")) {
+    for(float& a:angle) a=0;
+    anglesValid=gyroRunning;
+    out.println(F("{\"type\":\"heading0\"}"));
+  }
+  else if(!strcmp(line,"HELP")) out.println(F("{\"commands\":[\"STOP\",\"PROBE\",\"STATUS\",\"GYROINIT\",\"GYROZERO\",\"HEADING0\",\"PING\",\"SPIN m +|-\",\"MOT a b c d\",\"HELP\"],\"motion\":\"SPIN/MOT, watchdogged\"}"));
+  else out.println(F("{\"error\":\"UNKNOWN_COMMAND_NO_MOTION\"}"));
+}
+static void autorunCancel(const __FlashStringHelper* why) {
+  if(!autorunPending) return;
+  autorunPending=false;digitalWrite(AUTORUN_LED,LOW);
+  out.print(F("{\"type\":\"autorun_cancelled\",\"by\":\""));out.print(why);out.println(F("\"}"));
+}
+// Why the robot cannot start a run (0 = ready): no stored calibration, no gyro, or the gyro is still
+// zeroing (it needs ~2 s of stillness after power-on).
+static uint8_t notReady() {
+  if(!calValid) return 1;
+  if(!gyroRunning) return 2;
+  if(!biasValid) return 3;
+  if(!usOk(2)) return 4;   // front ultrasonic: the drive to N and the wall sweep need it
+  if(!clrOk) return 5;     // colour sensor: the turn decision needs it
+  return 0;
+}
+static const __FlashStringHelper* notReadyName(uint8_t n) {
+  switch(n) { case 1: return F("no_cal");case 2: return F("no_gyro");case 3: return F("gyro_zeroing");
+              case 4: return F("no_front_echo");default: return F("no_colour"); }
+}
+static uint8_t btnPressMask=0;
+static void buttonEvent(const __FlashStringHelper* action) {
+  out.print(F("{\"type\":\"button\",\"action\":\""));out.print(action);out.print(F("\",\"pins\":"));out.print(btnPressMask);
+  out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+}
+static void buttonService() {
+  uint8_t m=btnMask();bool up=(m&BTN_START_MASK)==0;uint32_t now=millis();
+  if(!up) { btnSeenMask|=m;btnPressMask=m; }
+  if(up!=btnRaw) { btnRaw=up;btnChangedAt=now; }
+  if(now-btnChangedAt<40||btnRaw==btnStable) return;   // 40 ms debounce
+  btnStable=btnRaw;
+  if(btnStable) { btnIgnoreUntilRelease=false;return; }   // released
+  if(btnIgnoreUntilRelease||now<1500) return;
+  if(runActive) { stopMotors();runStop=true;buttonEvent(F("stop")); }
+  else if(autorunPending) { autorunPending=false;digitalWrite(AUTORUN_LED,LOW);buttonEvent(F("cancel")); }
+  else if(uint8_t nr=notReady()) {   // only in the ready mode (the OLED says READY)
+    out.print(F("{\"type\":\"button\",\"action\":\"refused\",\"why\":\""));
+    out.print(notReadyName(nr));out.println(F("\"}"));
+  }
+  else {
+    uiResult=0;autorunPending=true;autorunUsbCancels=false;autorunAt=now+AUTORUN_MS;
+    buttonEvent(F("start"));
+  }
+}
+// ---- OLED: 128x32 SSD1306 at 0x3c, 4 rows of 16 characters; the shield's IMU/IIC header shares the bus
+// with the gyro. Drawn only while the motors are off (motor noise corrupts the bus, see QUIETGYRO),
+// only the rows that changed, and given up for good after any I2C timeout.
+static U8X8_SSD1306_128X32_UNIVISION_HW_I2C oled(U8X8_PIN_NONE);
+static bool oledOk=false;static uint32_t oledLastMs=0;
+static char shownWord[9]={1},shownL2[17]={1},shownL3[17]={1},shownBt[7]={1};   // never equal to a real text: first draw
+static bool oledBigRedrawn=false;
+static void oledBegin() {
+  Wire.beginTransmission(0x3c);
+  bool fitted=Wire.endTransmission()==0;
+  out.print(F("{\"type\":\"oled\",\"fitted\":"));out.print(fitted);out.println('}');
+  if(!fitted) { i2cFailed();return; }   // not fitted: leave the bus alone
+  oled.setBusClock(100000);oled.setI2CAddress(0x3c<<1);oled.begin();
+  oled.setFont(u8x8_font_chroma48medium8_r);
+  i2cBegin();   // begin() restarted the bus: back to 100 kHz with the 25 ms timeout
+  oledOk=true;
+}
+static void oledPut(uint8_t col,uint8_t row,char* shown,const char* want,uint8_t width,bool big) {
+  char pad[17];uint8_t n=strlen(want);
+  for(uint8_t i=0;i<width;++i) pad[i]=i<n?want[i]:' ';
+  pad[width]=0;
+  if(!strcmp(pad,shown)) return;
+  if(big) { oled.draw2x2String(col,row,pad);oledBigRedrawn=true; } else oled.drawString(col,row,pad);
+  strcpy(shown,pad);
+}
+// Sensor rows of the READY screen, o = OK, x = not: ultrasonics left to right (left side, left 45,
+// front, right 45, right side), then the four LDRs left to right (adc[0,2,1,3]) and the colour sensor.
+static void sensorRows(char* l2,char* l3) {
+  static const uint8_t usOrder[5]={3,0,2,1,4},ldrOrder[4]={0,2,1,3};
+  strcpy(l2,"US ");uint8_t n=3;
+  for(uint8_t i=0;i<5;++i) { l2[n++]=usOk(usOrder[i])?'o':'x';if(i<4) l2[n++]=' '; }
+  l2[n]=0;
+  strcpy(l3,"LDR ");n=4;
+  for(uint8_t i=0;i<4;++i) l3[n++]=ldrOk[ldrOrder[i]]?'o':'x';
+  strcpy(l3+n," CLR ");n+=5;l3[n++]=clrOk?'o':'x';l3[n]=0;
+}
+static void oledService() {
+  if(!oledOk||motorsLive||pulsing||millis()-oledLastMs<150) return;
+  oledLastMs=millis();
+  char word[9]="",l2[17]="",l3[17]="";
+  if(runActive) {
+    snprintf(word,sizeof word,"RUN %u/4",runStepNow?runStepNow:1);
+    strcpy(l2,runStepNow==2?"SETTLE ON N":runStepNow==3?(runTurnNow>0?"TURN LEFT":runTurnNow<0?"TURN RIGHT":"COLOUR + TURN"):
+              runStepNow==4?"PARK IN BOX":"WALK + STRAIGHTEN");
+    strcpy(l3,"PRESS TO STOP");
+  } else if(autorunPending) {
+    snprintf(word,sizeof word,"START %u",unsigned((autorunAt-millis()+999)/1000));
+    strcpy(l2,"STEP AWAY");strcpy(l3,"PRESS TO CANCEL");
+  } else if(uiResult==1) {
+    strcpy(word,"PARKED");
+    strcpy(l2,runTurnNow>0?"GREEN: LEFT BOX":runTurnNow<0?"RED: RIGHT BOX":"");
+    strcpy(l3,notReady()?"":"PRESS TO RERUN");
+  } else if(uiResult==2) {
+    strcpy(word,"STOPPED");strcpy(l2,uiReason);strcpy(l3,notReady()?"":"PRESS TO RERUN");
+  } else switch(notReady()) {
+    case 1: strcpy(word,"NO CAL");strcpy(l2,"SEND CALSAVE");break;
+    case 2: strcpy(word,"NO GYRO");strcpy(l2,"CHECK I2C");break;
+    case 3: strcpy(word,"ZEROING");strcpy(l2,"KEEP STILL");break;
+    case 4: strcpy(word,"CHECK");strcpy(l2,"NO FRONT ECHO");strcpy(l3,"AIM AT THE WALL");break;
+    case 5: strcpy(word,"CHECK");strcpy(l2,"COLOUR SENSOR");strcpy(l3,"NO READING");break;
+    default: strcpy(word,"READY");sensorRows(l2,l3);
+  }
+  oledPut(0,0,shownWord,word,8,true);
+  if(oledBigRedrawn) { oledBigRedrawn=false;shownBt[0]=1; }   // the big word painted over this corner
+  if(!strcmp(word,"READY")) oledPut(10,0,shownBt,btHostPresent()?"BT OK":"BT --",6,false);   // beside READY
+  oledPut(0,2,shownL2,l2,16,false);
+  oledPut(0,3,shownL3,l3,16,false);
+  if(Wire.getWireTimeoutFlag()) { i2cFailed();oledOk=false; }   // never let the display hang the gyro bus
+}
+static void commands(Stream& in,LineReader& r,bool usb) {
+  if(usb&&autorunUsbCancels&&in.available()) autorunCancel(F("usb"));
+  while(in.available()) {
+    char c=in.read();
+    if(c=='!') { stopMotors();runStop=runActive;r.used=0;r.dropping=true;continue; }
+    if(c=='\r') continue;
+    if(c=='\n') {
+      if(r.dropping) { r.dropping=false;r.used=0;continue; }
+      r.line[r.used]=0;r.used=0;command(r.line,usb);
+    } else if(r.used<sizeof(r.line)-1) r.line[r.used++]=c;
+    else { r.used=0;r.dropping=true;stopMotors();runStop=runActive; }
+  }
+}
+static void encShow() {
+  uint32_t c[4];noInterrupts();for(uint8_t i=0;i<4;++i) c[i]=encCount[i];interrupts();
+  out.print(F("{\"type\":\"enc\",\"ticks\":["));
+  for(uint8_t i=0;i<4;++i) { if(i) out.print(',');out.print(c[i]); }
+  out.println(F("]}"));
+}
+void setup() {
+  // Clear a watchdog reset flag first, or the next timeout could loop the bootloader.
+  MCUSR=0;wdt_disable();
+  lastResetWatchdog=resetMark==WATCHDOG_MARK;
+  bootCause=lastResetWatchdog?F("watchdog"):runningMark==RUNNING_MARK?F("brownout_or_reset_line"):F("power_on");
+  resetMark=0;runningMark=RUNNING_MARK;
+  inhibitMotors();Serial.begin(115200);Serial3.begin(BLUETOOTH_BAUD);i2cBegin();
+  for(uint8_t i=0;i<US_COUNT;++i) { digitalWrite(trig[i],LOW);pinMode(trig[i],OUTPUT);pinMode(echo[i],INPUT); }
+  // A4 and every motor direction pin remain high impedance.
+  for(uint8_t pin:light) pinMode(pin,INPUT);
+  for(uint8_t i=0;i<4;++i) pinMode(encPin[i],INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(encPin[0]),enc0,RISING);attachInterrupt(digitalPinToInterrupt(encPin[1]),enc1,RISING);
+  attachInterrupt(digitalPinToInterrupt(encPin[2]),enc2,RISING);attachInterrupt(digitalPinToInterrupt(encPin[3]),enc3,RISING);
+  pinMode(32,INPUT);
+  digitalWrite(colorS0,HIGH);digitalWrite(colorS1,LOW);
+  pinMode(colorS0,OUTPUT);pinMode(colorS1,OUTPUT);pinMode(colorS2,OUTPUT);pinMode(colorS3,OUTPUT);
+  delay(250);
+  // Interrupt-then-reset mode, 0.5 s: the ISR stops the motors, the next timeout resets.
+  cli();wdt_reset();
+  WDTCSR=_BV(WDCE)|_BV(WDE);
+  WDTCSR=_BV(WDIE)|_BV(WDE)|_BV(WDP2)|_BV(WDP0);
+  sei();
+  out.print(F("{\"type\":\"ready\",\"firmware\":\"HARDWARE_PROBE_2\",\"motion\":\"SPIN/MOT, watchdogged\",\"eeprom_writes\":\"CALSAVE only\""));
+  out.print(F(",\"reset_cause\":\""));
+  out.print(bootCause);
+  out.println(F("\"}"));
+  gyroBegin();
+  scan();
+  calLoad();calShow();
+  oledBegin();
+  pinMode(AUTORUN_LED,OUTPUT);digitalWrite(AUTORUN_LED,LOW);
+  for(uint8_t i=0;i<BTN_COUNT;++i) pinMode(BTN_FIRST+i,INPUT_PULLUP);
+  btnRaw=btnStable=(btnMask()&BTN_START_MASK)==0;btnIgnoreUntilRelease=!btnStable;btnChangedAt=millis();
+  out.print(F("{\"type\":\"start_button\",\"pin\":\"A15\",\"pressed_at_boot\":"));out.print(!btnStable);out.println('}');
+  bool armed=EEPROM.read(AUTORUN_ADDRESS)==AUTORUN_MAGIC;
+  out.print(F("{\"type\":\"autorun\",\"armed\":"));out.print(armed);
+  if(armed&&lastResetWatchdog) out.print(F(",\"skipped\":\"watchdog_reset\""));
+  else if(armed&&!calValid) out.print(F(",\"skipped\":\"no_calibration\""));
+  else if(armed) { autorunPending=true;autorunUsbCancels=true;autorunAt=millis()+AUTORUN_MS;out.print(F(",\"countdown_ms\":"));out.print(AUTORUN_MS); }
+  out.println('}');
+}
+static void service() {
+  buttonService();
+  oledService();
+  commands(Serial,usbReader,true);
+  commands(Serial3,btReader,false);
+  gyroService();
+  ttService();
+  stepService();
+  rampMotors();
+  if(motorsLive&&int32_t(millis()-motorDeadline)>=0) {
+    int8_t m=spinning;bool pulse=pulsing;stopMotors();
+    if(m>=0) { out.print(F("{\"type\":\"spin_done\",\"motor\":"));out.print(m+1);out.println('}'); }
+    else if(pulse) { out.print(F("{\"type\":\"pulse_done\",\"ms\":"));out.print(millis());out.println('}'); }
+    else out.println(F("{\"type\":\"drive_timeout_stop\"}"));
+  }
+}
+// The robot side of the run controller (run_logic.cpp). Every wait keeps the firmware going:
+// commands (STOP ends the run), watchdog, gyro, and the 5 Hz samples to USB and Bluetooth.
+// Sweep heading reconstruction (MegaIo::sweep): ping times since the sweep began, and where to put
+// each ping's heading as the gyro FIFO is drained after the stop.
+static uint16_t swAt[96];static float* swYaw;static uint8_t swN,swNext;static uint32_t swSpan;
+static void swTrace(uint16_t index,uint16_t total) {
+  // the FIFO's samples are spread evenly over the sweep: sample `index` ends at (index+1)/total of it
+  uint32_t t=uint32_t(float(index+1)*swSpan/total);
+  while(swNext<swN&&swAt[swNext]<=t) swYaw[swNext++]=yawDeg();
+}
+class MegaIo : public rl::Io {
+ public:
+  bool pump() {
+    service();
+    if(millis()-lastSample>=200u) { lastSample=millis();sample(); }
+    return !runStop;
+  }
+  bool wait(uint16_t ms) {
+    for(uint32_t t=millis();millis()-t<ms;) if(!pump()) return false;
+    return true;
+  }
+  // Skip the scan in progress (it may have started while moving), then the median of the next
+  // three per sensor; fewer than two echoes or a spread over 40 mm reads -1.
+  bool measure(int16_t us[rl::NUS],float* rg) override {
+    int16_t scans[3][rl::NUS];uint16_t seen=usSeq;int8_t taken=-1;uint32_t t0=millis();
+    while(taken<3) {
+      if(!pump()) return false;
+      if(millis()-t0>4000) { out.println(F("{\"error\":\"RUN_NO_FRESH_SCANS\"}"));return false; }
+      if(usSeq==seen) continue;
+      seen=usSeq;
+      if(taken>=0) for(uint8_t k=0;k<rl::NUS;++k) scans[taken][k]=usLatest[k];
+      ++taken;
+    }
+    for(uint8_t k=0;k<rl::NUS;++k) {
+      int16_t v[3];uint8_t n=0;
+      for(uint8_t s=0;s<3;++s) if(scans[s][k]>0) v[n++]=scans[s][k];
+      int16_t lo=32767,hi=-1;
+      for(uint8_t i=0;i<n;++i) { lo=min(lo,v[i]);hi=max(hi,v[i]); }
+      us[k]=(n<2||hi-lo>40)?-1:(n==3?v[0]+v[1]+v[2]-lo-hi:(v[0]+v[1])/2);
+    }
+    *rg=rgbc[1]?float(rgbc[0])/rgbc[1]:0;
+    return true;
+  }
+  // Motors on for ms, serviced (STOP, watchdog) but no full sample() while moving (it blocks ~180 ms
+  // and would stretch the move); the watchdog deadline is set past the soft stop.
+  bool runFor(uint16_t ms,int16_t* fronts=0) {
+    motorDeadline=millis()+ms+800;
+    for(uint32_t t0=millis();millis()-t0<ms;) { service();if(runStop) { stopMotors();return false; } if(fronts) sweepPing(fronts); }
+    return true;
+  }
+  // Soft stop: outputs ramp to 0 at the soft-start rate (rampMotors), then ~60 ms of short brake
+  // (TB6612 IN1 = IN2 = HIGH), then all off. No coasting: a small move stays small.
+  bool softStop(int16_t* fronts=0) {
+    for(uint8_t m=0;m<4;++m) motorTarget[m]=0;
+    for(uint32_t t=millis();millis()-t<300;) {
+      service();if(runStop) { stopMotors();return false; }
+      if(fronts) sweepPing(fronts);
+      bool still=true;for(uint8_t m=0;m<4;++m) if(motorNow[m]) still=false;
+      if(still) break;
+    }
+    for(uint8_t m=0;m<4;++m) { analogWrite(pwm[m],0);digitalWrite(motorIn1[m],HIGH);digitalWrite(motorIn2[m],HIGH);digitalWrite(pwm[m],HIGH); }
+    for(uint32_t t=millis();millis()-t<60;) { service();if(fronts) sweepPing(fronts); }
+    stopMotors();
+    return !runStop;
+  }
+  bool pulse(int8_t x,int8_t y,int8_t w,uint8_t pwm,uint16_t ms) override {
+    if(!startPulse(x,y,w,pwm,100)) return false;
+    if(!runFor(ms)||!softStop()) return false;
+    return wait(250);   // settle (the gyro FIFO is drained meanwhile)
+  }
+  // Smooth sweep (Runner::squareHere): one continuous rotation with the front pinged every >= 25 ms.
+  // The gyro is not read while turning; after the stop its FIFO (yaw only, 2.5 s) is drained sample by
+  // sample and each ping gets the heading of the sample at its time.
+  uint32_t swT0=0,swLastPing=0;uint8_t swMax=0;
+  void sweepPing(int16_t* fronts) {
+    if(swN>=swMax||millis()-swLastPing<25) return;
+    uint32_t a=millis();int16_t f=range(2);uint32_t b=millis();
+    swAt[swN]=uint16_t((a+b)/2-swT0);fronts[swN++]=f;swLastPing=b;
+  }
+  bool sweep(int8_t dir,uint8_t pwm,uint16_t ms,float* yaws,int16_t* fronts,uint8_t maxN,uint8_t* n) override {
+    *n=0;
+    if(!gyroRunning||!biasValid) return false;
+    uint16_t lost0=overflows+gyroRestarts+gyroResets;
+    gyroDrain(0,0);   // empty the FIFO: every later sample belongs to this sweep
+    swT0=millis();swLastPing=0;swN=0;swMax=maxN<96?maxN:96;
+    if(!startPulse(0,0,dir*100,pwm,100)) return false;
+    if(!runFor(ms,fronts)||!softStop(fronts)) return false;
+    swSpan=millis()-swT0;swYaw=yaws;swNext=0;
+    gyroDrain(0,0,swTrace);
+    while(swNext<swN) yaws[swNext++]=yawDeg();
+    *n=swN;
+    if(overflows+gyroRestarts+gyroResets!=lost0) return false;
+    return wait(250);
+  }
+  // Continuous forward drive (Runner::driveForward): no sample() while driving (it blocks ~180 ms, blind at
+  // 20 cm/s), only the commands/watchdog and one ultrasonic ping per poll, >= 25 ms after the previous
+  // ping ended (sample() leaves 15 ms against crosstalk): the front on every other poll, the other four
+  // in turn between, ordered so neighbouring beams never follow each other.
+  uint32_t lastPollMs=0;uint8_t pollCount=0,pollFocus=0;
+  bool driveStart(int8_t x,int8_t y,int8_t w,uint8_t pwm,uint8_t focus) override {
+    pollFocus=focus;
+    if(!startPulse(x,y,w,pwm,100)) return false;
+    motorDeadline=millis()+400;    // renewed by every poll: the motors stop if the run stops polling
+    lastPollMs=millis();pollCount=0;return !runStop;
+  }
+  bool driveSet(int8_t x,int8_t y,int8_t w,uint8_t pwm) override { return applyMix(x,y,w,pwm); }
+  bool drivePoll(int16_t us[rl::NUS],float* dt) override {
+    static const uint8_t OTHERS[4]={rl::LSIDE,rl::R45,rl::RSIDE,rl::L45};
+    while(millis()-lastPollMs<25) { service();if(runStop) { stopMotors();return false; } }
+    service();
+    static const uint8_t SIDES[5]={rl::LSIDE,rl::RSIDE,rl::LSIDE,rl::RSIDE,rl::FRONT};   // strafes
+    static const uint8_t ALL[8]={rl::FRONT,rl::LSIDE,rl::RSIDE,rl::FRONT,rl::LSIDE,rl::RSIDE,rl::L45,rl::R45};   // combined moves at N
+    static const uint8_t LEFT[5]={rl::FRONT,rl::LSIDE,rl::FRONT,rl::LSIDE,rl::L45};    // after a right turn
+    static const uint8_t RIGHT[5]={rl::FRONT,rl::RSIDE,rl::FRONT,rl::RSIDE,rl::R45};   // after a left turn
+    uint8_t k=pollFocus==rl::FOCUS_SIDES?SIDES[pollCount%5]:pollFocus==rl::FOCUS_ALL?ALL[pollCount%8]:
+              pollFocus==rl::FOCUS_LEFT?LEFT[pollCount%5]:pollFocus==rl::FOCUS_RIGHT?RIGHT[pollCount%5]:
+              (pollCount&1)?OTHERS[(pollCount>>1)&3]:uint8_t(rl::FRONT);++pollCount;
+    for(uint8_t i=0;i<rl::NUS;++i) us[i]=rl::NOT_PINGED;
+    us[k]=range(k);   // ultrasonic_mm order: trig/echo index = rl index
+    uint32_t now=millis();*dt=(now-lastPollMs)/1000.0f;lastPollMs=now;
+    if(motorsLive) motorDeadline=now+400;
+    if(runStop) { stopMotors();return false; }
+    return motorsLive;   // false: the motors were stopped (deadline missed or STOP)
+  }
+  // TB6612 short brake (IN1 = IN2 = HIGH) for ~120 ms, then all off: with the outputs just released the
+  // robot rolled ~20 cm from 380 mm/s (2 Nov); braking brings that to a few cm.
+  bool driveEnd() override {
+    if(motorsLive) {
+      for(uint8_t m=0;m<4;++m) { analogWrite(pwm[m],0);digitalWrite(motorIn1[m],HIGH);digitalWrite(motorIn2[m],HIGH);digitalWrite(pwm[m],HIGH); }
+      for(uint32_t t=millis();millis()-t<120;) { wdt_reset();service(); }
+    }
+    stopMotors();return wait(350);
+  }
+  bool yaw(float* deg) override {
+    if(!gyroRunning||!biasValid) return false;
+    *deg=yawDeg();return true;
+  }
+  uint16_t lost() override { return overflows+gyroRestarts+gyroResets; }
+  uint32_t ticks() override { return encTotal(); }
+  uint32_t ms() override { return millis(); }
+  void setRamp(uint8_t up) override { rampUp=up<1?1:up>RAMP_STEP?RAMP_STEP:up; }
+  // One continuous rotation stopped by the wheel encoders: until the four wheels have turned `want` more
+  // ticks in total (or ms), then the soft stop and settle; *got = ticks counted, coasting included.
+  bool turnTicks(int8_t dir,uint8_t p,uint32_t want,uint16_t ms,uint32_t* got) override {
+    uint32_t t0=encTotal();*got=0;
+    if(!startPulse(0,0,dir*100,p,100)) return false;
+    for(uint32_t s=millis();encTotal()-t0<want&&millis()-s<ms;) {
+      service();if(runStop) { stopMotors();return false; }
+      motorDeadline=millis()+300;
+    }
+    if(!softStop()) return false;
+    bool ok=wait(250);
+    *got=encTotal()-t0;
+    return ok;
+  }
+  void event(const char* name,int16_t a,int16_t b,int16_t c,int16_t d) override {
+    if(!strcmp_P(name,PSTR("step"))) runStepNow=uint8_t(a);
+    else if(!strcmp_P(name,PSTR("colour"))) runTurnNow=int8_t(c);
+    out.print(F("{\"type\":\"run\",\"ev\":\""));out.print(reinterpret_cast<const __FlashStringHelper*>(name));
+    out.print(F("\",\"v\":["));out.print(a);out.print(',');out.print(b);out.print(',');out.print(c);out.print(',');out.print(d);
+    out.print(F("],\"ms\":"));out.print(millis());out.println('}');
+  }
+};
+static void runTournament() {
+  runRequested=false;runActive=true;runStop=false;runStepNow=0;runTurnNow=0;uiResult=0;
+  gyroQuiet=true;if(!gyroRunning) gyroBegin();   // no I2C while a motor runs
+  out.print(F("{\"type\":\"run_start\",\"first\":"));out.print(runFirst);out.print(F(",\"last\":"));out.print(runLast);out.println('}');
+  MegaIo io;rl::Runner runner(io,calRam);
+  // A fresh gyro zero before every run, taken while the robot sits still at the start (2 Nov: a zero
+  // from power-on had drifted and a 90 deg gyro turn was ~60 deg on the floor). 2 s, applied only if
+  // still; otherwise it zeroes itself once still, up to 10 s more.
+  biasValid=false;gyroZero();
+  if(!biasValid) {
+    out.println(F("{\"type\":\"run_wait\",\"for\":\"gyro_zero\",\"note\":\"keep the robot still\"}"));
+    for(uint32_t t=millis();!biasValid&&millis()-t<10000&&io.pump(););
+  }
+  bool ok=runStop?false:creepTestTarget>0?runner.creepTest(creepTestTarget):runner.run(runFirst,runLast,runForceTurn);
+  creepTestTarget=0;
+  stopMotors();runActive=false;
+  uiResult=ok?1:2;runTurnNow=runner.turn();uiReason[0]=0;
+  if(!ok) { if(runner.reason()) strncpy_P(uiReason,runner.reason(),16);else strcpy(uiReason,"BY STOP");uiReason[16]=0; }
+  out.print(F("{\"type\":\"run_end\",\"result\":\""));out.print(ok?F("done"):F("stopped"));
+  out.print(F("\",\"reason\":\""));
+  if(!ok&&runner.reason()) out.print(reinterpret_cast<const __FlashStringHelper*>(runner.reason()));
+  out.print(F("\",\"turn\":"));out.print(runner.turn());out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+}
+void loop() {
+  if(autorunPending) {
+    int32_t left=int32_t(autorunAt-millis());
+    if(left<=0) {
+      autorunPending=false;digitalWrite(AUTORUN_LED,HIGH);   // LED on while the run lasts
+      runFirst=1;runLast=4;runForceTurn=0;runRequested=true;
+    } else digitalWrite(AUTORUN_LED,(millis()/(left<3000?125:500))&1);
+  }
+  if(runRequested) { runTournament();digitalWrite(AUTORUN_LED,LOW); }
+  service();
+  if(millis()-lastSample>=(stepKind==STEP_IDLE?200u:100u)) { lastSample=millis();sample(); }  // 5 Hz, 10 Hz in a step
+}
