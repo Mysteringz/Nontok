@@ -128,6 +128,10 @@ class Io {
   virtual void event(const char* name, int16_t a = 0, int16_t b = 0, int16_t c = 0, int16_t d = 0) = 0;
   // Wheel encoder ticks so far, all four wheels summed (0 and never changing: none fitted).
   virtual uint32_t ticks() { return 0; }
+  // Milliseconds since power-up (0 and never changing: no clock; time-boxed steps then run once).
+  virtual uint32_t ms() { return 0; }
+  // Soft-start rate: PWM per 10 ms while a wheel speeds up (8 by default); slowing down is unchanged.
+  virtual void setRamp(uint8_t up) { (void)up; }
   // One continuous rotation (dir +1 CCW) at pwm, stopped once the wheels have turned `want` more ticks in
   // total (or after ms), soft stop and settle; *got = ticks counted including the coast. false = stopped.
   virtual bool turnTicks(int8_t dir, uint8_t pwm, uint32_t want, uint16_t ms, uint32_t* got) {
@@ -136,6 +140,9 @@ class Io {
   virtual ~Io() {}
 };
 
+#ifndef __AVR__
+bool setTunable(const char* name, float v);   // host simulator only
+#endif
 class Runner {
  public:
   Runner(Io& io, const Calib& cal);
@@ -200,7 +207,15 @@ class Runner {
   bool align(Pose pose, uint8_t set, float target, float deadX, float deadY, uint8_t maxMoves, int16_t us[NUS]);
   bool straighten(uint8_t set, const int16_t a[NUS], int16_t us[NUS], bool* known = 0, float maxTurn = 35);
   bool parkIn(Pose box, uint8_t set, int16_t us[NUS]);
+  bool finalAdjust(Pose box, uint8_t set, int16_t us[NUS]);
+  bool finalAdjustMoves(Pose box, uint8_t set, int16_t us[NUS]);
+  bool home(float y);
   bool aimStart(int16_t us[NUS], bool* done);
+  bool startNudge(int16_t us[NUS]);
+  bool startForward(int16_t us[NUS]);
+  int16_t pre[NUS];    // the readings before the start creep (aimStart's steep check uses them too)
+  bool steepStart(float y0, int8_t dir, int16_t us[NUS], bool* done);
+  bool walk45(float a, int8_t dir, int16_t us[NUS]);
   bool fitHeading(Pose pose, uint8_t set, int16_t us[NUS]);
   bool faceExpected(int16_t want, int16_t us[NUS]);
   bool squareByMove(uint8_t set, float dist, int16_t us[NUS]);
@@ -208,6 +223,8 @@ class Runner {
   // driveForward heading fit (skewMode 1 + SET: on): the side offset against the front reading over
   // every front echo of the drive, least squares; see driveSkew
   uint8_t skewMode;
+  // driveForward's stop sensor (FRONT unless a steep start walks on the 45 deg beam facing the main wall)
+  uint8_t stopK;
   float rN, rF, rL, rFF, rFL, rFmin, rFmax;
   bool driveSkew(float* deg) const;
   bool snapped;        // driveForward saw both side walls at that spacing: snap holds front / sides then
@@ -217,7 +234,8 @@ class Runner {
   // 2 cm rule (user, 2 Nov): a sensor reading <= BLOCK_MM bars every move toward it (front: forward;
   // a 45 deg beam: forward and sideways to its side; a side: sideways to it) until it reads > 2 x.
   uint8_t blocked;     // bit per sensor
-  bool inPark;         // step 4 (to the box and parking)
+  bool inPark;
+  bool wallPhase;      // steps 1-2 (to the main wall and N): slower creeps         // step 4 (to the box and parking)
   bool cornered;       // the last forward drive ended at a wall (corner stop or 2 cm rule)
   void noteWalls(const int16_t* z);
   bool towardWall(int8_t x, int8_t y) const;

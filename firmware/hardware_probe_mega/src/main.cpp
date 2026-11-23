@@ -20,6 +20,7 @@
 #include <EEPROM.h>
 #include <U8x8lib.h>
 #include "run_logic.h"
+#include "../../core_robot_mega/include/stepper_driver.h"
 extern "C" uint8_t colorPulseBurst();
 static_assert(F_CPU==core::COLOR_CPU_HZ,"Probe sampling requires a 16 MHz Mega");
 static const uint8_t pwm[]={12,8,9,5};
@@ -72,8 +73,9 @@ static bool btnRaw=true,btnStable=true,btnIgnoreUntilRelease=false;static uint32
 static uint8_t btnSeenMask=0,btnPinsReport=0;static bool btnReport=false;
 // Soft start: outputs step toward their targets by RAMP_STEP every RAMP_MS (0->100 in
 // ~125 ms), limiting the inrush that reset the board with four motors starting at once.
-// Stopping is never ramped.
-static const uint8_t RAMP_STEP=8,RAMP_MS=10;
+// Stopping is never ramped. rampUp: the step while a wheel speeds up (Runner::finalAdjust lowers it, user
+// 3 Nov: the small fix moves in the box started too hard and overshot).
+static const uint8_t RAMP_STEP=8,RAMP_MS=10;static uint8_t rampUp=RAMP_STEP;
 static int16_t motorTarget[4]={},motorNow[4]={};static uint32_t lastRampMs=0;
 // The bootloader clears MCUSR, so the watchdog's early interrupt leaves its own mark in
 // RAM that a reset does not initialise. Any other value means power-on/brown-out/external.
@@ -173,7 +175,32 @@ static const uint8_t STEP_IDLE=0,STEP_GO=1,STEP_TURN=2;
 static uint8_t stepKind=STEP_IDLE;
 static void stepEnd(bool reached,const __FlashStringHelper* reason);
 static void stepReport(Print& o);
+// Stepper on the shield PL header (STEP D46, DIR D45, EN D44; see stepper_driver.h). "STEPPER deg"
+// starts one open-loop move; samples pause while it runs so service() can time every step. The
+// sample reports it as "stepper" (no shaft feedback: "made" counts the pulses sent to the driver).
+static StepperDriver stepper;
+static bool stepperActive=false,stepperAborted=false,stepperLocked=false;
+// Software travel limit, relative to the set zero ("STEPPER ZERO"): every move must end in 0..130 deg
+// (130 = the dump position). Moves that would end outside are refused, not clipped.
+static const int16_t STEPPER_MIN_DEG=0,STEPPER_MAX_DEG=130;
+static long stepperFrom=0,stepperWant=0,stepperMade=0;static uint16_t stepperMoves=0;
+static void stepperFinish(bool aborted) {
+  if(!stepperActive) return;
+  if(aborted) stepper.stop();
+  stepperActive=false;stepperAborted=aborted;stepperMade=stepper.position()-stepperFrom;
+  out.print(F("{\"type\":\"stepper_done\",\"want\":"));out.print(stepperWant);out.print(F(",\"made\":"));out.print(stepperMade);
+  out.print(F(",\"aborted\":"));out.print(aborted);out.print(F(",\"pos_deg\":"));out.print(stepper.positionDegrees(),1);
+  out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+}
+static void stepperReport(Print& o) {
+  o.print(F(",\"stepper\":{\"pos_deg\":"));o.print(stepper.positionDegrees(),1);o.print(F(",\"busy\":"));o.print(stepperActive);
+  o.print(F(",\"moves\":"));o.print(stepperMoves);o.print(F(",\"want\":"));o.print(stepperWant);
+  o.print(F(",\"made\":"));o.print(stepperMade);o.print(F(",\"aborted\":"));o.print(stepperAborted);
+  o.print(F(",\"hold\":"));o.print(stepperLocked);
+  o.print(F(",\"min_deg\":"));o.print(STEPPER_MIN_DEG);o.print(F(",\"max_deg\":"));o.print(STEPPER_MAX_DEG);o.print('}');
+}
 static void stopMotors() {
+  stepperFinish(true);
   if(ttLeg>=0) ttEnd(TT_ABORTED,F("stopped"));
   if(stepKind!=STEP_IDLE) stepEnd(false,F("stopped"));
   haltMotors();
@@ -195,7 +222,9 @@ static void rampMotors() {
     int16_t now=motorNow[m],target=motorTarget[m];
     if(now==target) continue;
     // Linear steps pass through zero on reversal, so direction flips at zero output.
-    now+=constrain(target-now,-int16_t(RAMP_STEP),int16_t(RAMP_STEP));
+    // speeding up (same sign, larger) at rampUp; slowing down or reversing at RAMP_STEP
+    int16_t step=(abs(target)>abs(now)&&(now==0||(now>0)==(target>0)))?rampUp:RAMP_STEP;
+    now+=constrain(target-now,-step,step);
     motorNow[m]=now;applyMotor(m,now);
   }
 }
@@ -478,7 +507,7 @@ static void compactSample(Print& o,const uint16_t* adc,const int16_t* us,const u
   o.print(F(",\"bus_errors\":"));o.print(busErrors);
   o.print(F(",\"i2c_timeouts\":"));o.print(i2cTimeouts);o.print(F(",\"gyro_restarts\":"));o.print(gyroRestarts);
   o.print(F(",\"gyro_resets\":"));o.print(gyroResets);o.print(F(",\"bias_valid\":"));o.print(biasValid);
-  o.print(F("},\"color_rgbc\":"));list(o,rgbc,4);o.print(F(",\"start_btn\":"));o.print(btnReport);o.print(F(",\"btn_pins\":"));o.print(btnPinsReport);o.print(F(",\"chk\":"));o.print(checkMask());ttReport(o);stepReport(o);o.println('}');
+  o.print(F("},\"color_rgbc\":"));list(o,rgbc,4);o.print(F(",\"start_btn\":"));o.print(btnReport);o.print(F(",\"btn_pins\":"));o.print(btnPinsReport);o.print(F(",\"chk\":"));o.print(checkMask());ttReport(o);stepReport(o);stepperReport(o);o.println('}');
 }
 // Bluetooth's 9600 baud carries ~960 bytes/s: a full sample (~400 bytes) goes once a second
 // and this ~62-byte line fills the other four of five, so the console still updates at 5 Hz.
@@ -730,7 +759,7 @@ static void sample() {
   Serial.print(F(",\"color_out_pin\":32,\"color_rgbc\":["));
   for(uint8_t i=0;i<4;++i) { if(i) Serial.print(',');Serial.print(rgbc[i]); }
   Serial.print(']');
-  ttReport(Serial);stepReport(Serial);
+  ttReport(Serial);stepReport(Serial);stepperReport(Serial);
   Serial.print(F(",\"color_exposure_cycles\":"));Serial.print(uint32_t(core::COLOR_MIN_BURSTS)*core::COLOR_BURST_CYCLES);
   Serial.print(F(",\"color_filters\":\"DRIVEN_20PCT\",\"cycle_ms\":"));Serial.print(millis()-cycleStart);Serial.println('}');
   static uint32_t lastBtMs=0;  // Steps sample at 10 Hz; Bluetooth stays at 5 Hz, its limit.
@@ -875,6 +904,40 @@ static void command(const char* line,bool usb) {
     out.print(F(",\"ms\":"));out.print(SPIN_MS);out.println('}');
     return;
   }
+  // Stepper. "STEPPER HOLD 1|0": lock (driver stays energised, the shaft holds) or free it.
+  // "STEPPER ZERO": the current position becomes 0 deg. "STEPPER TO deg": move to an absolute angle,
+  // -720..720 deg from zero (the page's 1 deg nudges use it, so rounding to whole steps never adds up).
+  // "STEPPER deg": relative move of -360..360 deg. Moves stop the drive motors first. Every move must
+  // end inside STEPPER_MIN_DEG..STEPPER_MAX_DEG of zero, else BAD_STEPPER_LIMIT and nothing moves.
+  if(!strcmp(line,"STEPPER HOLD 1")||!strcmp(line,"STEPPER HOLD 0")) {
+    stepper.setHold(line[13]=='1');stepperLocked=line[13]=='1';
+    out.print(F("{\"type\":\"stepper_hold\",\"hold\":"));out.print(stepperLocked);out.println('}');
+    return;
+  }
+  if(!strcmp(line,"STEPPER ZERO")) {
+    stepperFinish(true);stepper.setZero();
+    out.println(F("{\"type\":\"stepper_zero\",\"pos_deg\":0}"));
+    return;
+  }
+  if(!strncmp(line,"STEPPER ",8)) {
+    int16_t v[1];stopMotors();
+    bool absolute=!strncmp(line+8,"TO ",3);
+    if(!parseInts(line+(absolute?11:8),v,1)||(absolute?(v[0]<-720||v[0]>720):(!v[0]||v[0]<-360||v[0]>360))) {
+      out.println(F("{\"error\":\"BAD_STEPPER\"}"));return;
+    }
+    long from=stepper.position(),want=absolute?stepper.degreesToSteps(v[0])-from:stepper.degreesToSteps(v[0]);
+    if(from+want<stepper.degreesToSteps(STEPPER_MIN_DEG)||from+want>stepper.degreesToSteps(STEPPER_MAX_DEG)) {
+      out.print(F("{\"error\":\"BAD_STEPPER_LIMIT\",\"min_deg\":"));out.print(STEPPER_MIN_DEG);
+      out.print(F(",\"max_deg\":"));out.print(STEPPER_MAX_DEG);out.print(F(",\"pos_deg\":"));out.print(stepper.positionDegrees(),1);out.println('}');
+      return;
+    }
+    stepperFrom=from;stepperWant=want;
+    stepperMade=0;stepperAborted=false;
+    ++stepperMoves;stepperActive=true;stepper.startSteps(stepperWant);
+    out.print(F("{\"type\":\"stepper_start\",\"deg\":"));out.print(v[0]);out.print(F(",\"steps\":"));out.print(stepperWant);
+    out.print(F(",\"ms\":"));out.print(millis());out.println('}');
+    return;
+  }
   if(!strncmp(line,"WMAP ",5)) {
     int16_t v[8];bool ok=parseInts(line+5,v,8);uint8_t used=0;
     for(uint8_t p=0;ok&&p<4;++p) { ok=v[2*p]>=1&&v[2*p]<=4&&(v[2*p+1]==1||v[2*p+1]==-1)&&!(used&(1<<v[2*p]));used|=1<<v[2*p]; }
@@ -980,7 +1043,7 @@ static void command(const char* line,bool usb) {
     anglesValid=gyroRunning;
     out.println(F("{\"type\":\"heading0\"}"));
   }
-  else if(!strcmp(line,"HELP")) out.println(F("{\"commands\":[\"STOP\",\"PROBE\",\"STATUS\",\"GYROINIT\",\"GYROZERO\",\"HEADING0\",\"PING\",\"SPIN m +|-\",\"MOT a b c d\",\"HELP\"],\"motion\":\"SPIN/MOT, watchdogged\"}"));
+  else if(!strcmp(line,"HELP")) out.println(F("{\"commands\":[\"STOP\",\"PROBE\",\"STATUS\",\"GYROINIT\",\"GYROZERO\",\"HEADING0\",\"PING\",\"SPIN m +|-\",\"MOT a b c d\",\"STEPPER deg|TO deg|HOLD 1/0|ZERO\",\"HELP\"],\"motion\":\"SPIN/MOT, watchdogged\"}"));
   else out.println(F("{\"error\":\"UNKNOWN_COMMAND_NO_MOTION\"}"));
 }
 static void autorunCancel(const __FlashStringHelper* why) {
@@ -1144,6 +1207,7 @@ void setup() {
   scan();
   calLoad();calShow();
   oledBegin();
+  stepper.begin();
   pinMode(AUTORUN_LED,OUTPUT);digitalWrite(AUTORUN_LED,LOW);
   for(uint8_t i=0;i<BTN_COUNT;++i) pinMode(BTN_FIRST+i,INPUT_PULLUP);
   btnRaw=btnStable=(btnMask()&BTN_START_MASK)==0;btnIgnoreUntilRelease=!btnStable;btnChangedAt=millis();
@@ -1156,6 +1220,7 @@ void setup() {
   out.println('}');
 }
 static void service() {
+  if(stepperActive&&!stepper.service()) stepperFinish(false);
   buttonService();
   oledService();
   commands(Serial,usbReader,true);
@@ -1310,6 +1375,8 @@ class MegaIo : public rl::Io {
   }
   uint16_t lost() override { return overflows+gyroRestarts+gyroResets; }
   uint32_t ticks() override { return encTotal(); }
+  uint32_t ms() override { return millis(); }
+  void setRamp(uint8_t up) override { rampUp=up<1?1:up>RAMP_STEP?RAMP_STEP:up; }
   // One continuous rotation stopped by the wheel encoders: until the four wheels have turned `want` more
   // ticks in total (or ms), then the soft stop and settle; *got = ticks counted, coasting included.
   bool turnTicks(int8_t dir,uint8_t p,uint32_t want,uint16_t ms,uint32_t* got) override {
@@ -1365,5 +1432,6 @@ void loop() {
   }
   if(runRequested) { runTournament();digitalWrite(AUTORUN_LED,LOW); }
   service();
-  if(millis()-lastSample>=(stepKind==STEP_IDLE?200u:100u)) { lastSample=millis();sample(); }  // 5 Hz, 10 Hz in a step
+  // Samples wait while the stepper moves (a sample blocks ~150 ms, which would stall the steps).
+  if(!stepperActive&&millis()-lastSample>=(stepKind==STEP_IDLE?200u:100u)) { lastSample=millis();sample(); }  // 5 Hz, 10 Hz in a step
 }

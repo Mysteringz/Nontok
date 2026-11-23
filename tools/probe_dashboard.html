@@ -3,175 +3,277 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Probe Live View</title>
+<title>System Checkup</title>
 <style>
-:root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --mute:#667085; --line:#e4e7ec; --bad:#c0362c; --ok:#1f7a4d;
-  --c0:#2a6fdb; --c1:#d9480f; --c2:#2b8a3e; --c3:#9c36b5; --c4:#0b7285; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#111418; --card:#1a1e24; --ink:#e7eaee;
-  --mute:#98a2b3; --line:#2b313a; --bad:#ff6b5e; --ok:#4cc38a; --c0:#6ea8ff; --c1:#ff922b; --c2:#69db7c; --c3:#da77f2; --c4:#66d9e8; } }
-:root[data-theme="dark"] { --bg:#111418; --card:#1a1e24; --ink:#e7eaee; --mute:#98a2b3; --line:#2b313a; --bad:#ff6b5e;
-  --ok:#4cc38a; --c0:#6ea8ff; --c1:#ff922b; --c2:#69db7c; --c3:#da77f2; --c4:#66d9e8; }
+/* Java Swing, Metal look and feel with the Ocean theme. Light only. */
+:root { color-scheme:light;
+  --bg:#eeeeee; --card:#ffffff; --ink:#333333; --mute:#666666; --line:#b8cfe5; --bad:#cc2222; --ok:#1f8a3a;
+  --c0:#3a6ea5; --c1:#d9480f; --c2:#2b8a3e; --c3:#9c36b5; --c4:#0b7285;
+  --edge:#7a8a99; --sel:#b8cfe5; --focus:#a3b8cc; --title:#21436b; }
 * { box-sizing:border-box; }
-body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.4 -apple-system,system-ui,sans-serif; }
-header { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); }
-h1 { font-size:16px; margin:0; }
-.badge { font-size:12px; padding:2px 8px; border-radius:99px; border:1px solid var(--line); color:var(--mute); }
-.badge.ok { color:var(--ok); border-color:var(--ok); } .badge.bad { color:var(--bad); border-color:var(--bad); }
-.buttons { display:flex; flex-wrap:wrap; gap:6px; margin-left:auto; }
-button { font:inherit; padding:5px 10px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer; }
-button:hover { border-color:var(--mute); }
-main { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr)); gap:12px; padding:12px 16px; }
-section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; min-width:0; }
-h2 { font-size:13px; margin:0 0 8px; color:var(--mute); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
-.vals { display:flex; flex-wrap:wrap; gap:6px 16px; margin-bottom:8px; }
-.val b { font-size:20px; font-variant-numeric:tabular-nums; display:block; }
-.val span { font-size:12px; color:var(--mute); }
+html, body { background:var(--bg); }
+body { margin:0; color:var(--ink); font:12px/1.35 "Lucida Grande","Dialog",Tahoma,"Segoe UI",sans-serif; }
+/* JFrame chrome */
+.frame { margin:8px; height:calc(100vh - 16px); display:flex; flex-direction:column; overflow:hidden;
+  border:1px solid var(--edge); background:var(--bg); box-shadow:0 2px 8px rgba(0,0,0,.18); min-width:0; }
+.frame > * { flex:none; }
+.titlebar { display:flex; align-items:center; gap:8px; padding:4px 8px; color:#fff; font-weight:bold;
+  background:linear-gradient(#6d92c2, #4a6fa0); border-bottom:1px solid #2d4a70; }
+.titlebar .icon { width:14px; height:14px; border:1px solid #fff; background:linear-gradient(#fff,#c8d8ea); }
+.titlebar .wbtn { margin-left:auto; display:flex; gap:3px; }
+.titlebar .wbtn i { width:14px; height:13px; border:1px solid #2d4a70; background:linear-gradient(#e9f0f8,#b8cfe5); display:block; }
+/* JToolBar */
+header { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:4px 6px; border-bottom:1px solid var(--edge);
+  background:linear-gradient(#f7f7f7, #e3e3e3); }
+.sep { width:1px; align-self:stretch; background:var(--edge); box-shadow:1px 0 #fff; margin:0 3px; }
+header label.l { font-weight:bold; }
+.badge { padding:2px 6px; border:1px solid var(--edge); background:#fff; color:var(--mute); }
+.badge.ok { color:var(--ok); border-color:var(--ok); background:#eef8f0; } .badge.bad { color:var(--bad); border-color:var(--bad); background:#fbeeee; }
+.buttons { display:flex; flex-wrap:wrap; gap:4px; margin-left:auto; }
+/* JButton (Ocean gradient) */
+button { font:inherit; font-weight:bold; color:var(--ink); padding:3px 12px; border:1px solid var(--edge); border-radius:0; cursor:pointer;
+  background:linear-gradient(#ffffff 0%, #ffffff 30%, #dde8f3 100%); }
+button:hover { border-color:#4a6fa0; background:linear-gradient(#ffffff, #cddcec); }
+button:active { background:var(--sel); }
+button:focus-visible { outline:1px dotted var(--focus); outline-offset:-4px; }
+button:disabled { color:#999; border-color:#b0b0b0; background:#eeeeee; cursor:default; }
+/* JTextField / JComboBox */
+select, input[type=text], input:not([type]) { font:inherit; color:var(--ink); padding:2px 4px; border:1px solid var(--edge); border-radius:0; background:#fff; }
+select { background:linear-gradient(#ffffff, #dde8f3); padding-right:2px; }
+input:focus, select:focus { outline:none; border-color:#4a6fa0; box-shadow:inset 0 0 0 1px var(--sel); }
+input[type=checkbox], input[type=range] { accent-color:#6382bf; }
+/* JPanel with TitledBorder */
+section, .tb { position:relative; background:var(--bg); border:1px solid var(--line); padding:14px 8px 8px; margin:0; min-width:0; }
+h2 { position:absolute; top:-8px; left:8px; margin:0; padding:0 4px; background:var(--bg); color:var(--title);
+  font-size:12px; font-weight:bold; text-transform:none; letter-spacing:0; }
+h3 { margin:7px 0 3px; font-size:12px; font-weight:bold; color:var(--title); }
+h3:first-child { margin-top:0; }
+/* One screen: car view top-left, charts/tools bottom-left, checkup down the right. Panels scroll inside, the page never does. */
+.frame > .layout { flex:1 1 0; min-height:0; }
+.layout { min-height:0; display:grid; gap:14px 10px; padding:14px 8px 8px;
+  grid-template-columns:minmax(0,1.3fr) minmax(340px,1fr); grid-template-rows:minmax(0,1.15fr) minmax(0,1fr);
+  grid-template-areas:"car check" "bottom check"; }
+.left { grid-area:car; display:flex; flex-direction:column; }
+.check { grid-area:check; display:flex; flex-direction:column; min-height:0; }
+.check-body { flex:1 1 0; min-height:0; overflow:auto; }
+.tabpane { grid-area:bottom; display:flex; flex-direction:column; min-height:0; }
+@media (max-width:1000px), (max-height:560px) {
+  .frame { height:auto; overflow:visible; }
+  .layout { grid-template-columns:minmax(0,1fr); grid-template-rows:auto; grid-template-areas:"car" "check" "bottom"; }
+  .left .view { flex:none; height:55vh; } .tabbody { max-height:none; }
+}
+/* Car view: a sunken canvas */
+.view { position:relative; flex:1 1 0; min-height:120px; overflow:hidden; background:#fff;
+  border:1px solid var(--edge); box-shadow:inset 1px 1px 0 #d0d0d0; }
+#car { width:100%; height:100%; display:block; }
+.view { cursor:grab; touch-action:none; } .view.dragging { cursor:grabbing; }
+.hud-r { display:flex; gap:4px; } .hud-r button { pointer-events:auto; }
+.hud { position:absolute; top:8px; left:8px; display:flex; flex-wrap:wrap; gap:4px 16px; pointer-events:none;
+  background:rgba(238,238,238,.9); border:1px solid var(--edge); padding:4px 8px; }
+.hud .val b { font-size:18px; }
+.hud-r { position:absolute; bottom:8px; right:8px; }
+.legend { position:absolute; bottom:10px; left:8px; color:var(--mute); }
+/* Checkup: LabVIEW front panel (grey panel, recessed frames, round LEDs, numeric indicators, bars, tanks, dials) */
+.lv-panel { background:#d4d0c8; color:#000; padding:6px 8px 8px; font:12px "Segoe UI",Tahoma,"Lucida Grande",sans-serif;
+  border:1px solid; border-color:#808080 #fff #fff #808080; box-shadow:inset 1px 1px 0 #404040; }
+.lv-frame { position:relative; margin-top:12px; padding:12px 6px 6px; border:1px solid; border-color:#808080 #fff #fff #808080;
+  box-shadow:inset 1px 1px 0 #fff, 1px 1px 0 #808080 inset; }
+.lv-flabel { position:absolute; top:-8px; left:6px; padding:0 3px; background:#d4d0c8; font-weight:bold; }
+.lv-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px 8px; }
+.lv-grid.five { grid-template-columns:repeat(5,minmax(0,1fr)); } .lv-grid.four { grid-template-columns:repeat(4,minmax(0,1fr)); }
+.lv-grid.five .lv-item { min-width:0; }
+.lv-item { min-width:0; } .lv-item.wide { grid-column:span 1; }
+.lv-label { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.lv-line { display:flex; align-items:center; gap:5px; margin:2px 0; min-width:0; }
+.lv-led { width:16px; height:16px; border-radius:50%; flex:none; border:2px solid #a8a8a8; }
+.lv-led.big { width:24px; height:24px; border-width:3px; }
+.lv-led.g { background:radial-gradient(circle at 35% 30%, #f0fff0 0 10%, #3ee83e 38%, #0a7a0a 100%); box-shadow:0 0 0 1px #404040, 0 0 7px 1px rgba(60,230,60,.75); }
+.lv-led.r { background:radial-gradient(circle at 35% 30%, #fff0ee 0 10%, #ff3b2b 38%, #8a0b0b 100%); box-shadow:0 0 0 1px #404040, 0 0 7px 1px rgba(255,60,40,.75); }
+.lv-num { flex:1 1 auto; min-width:0; background:#ececec; padding:1px 4px; text-align:right; font-variant-numeric:tabular-nums;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; border:1px solid; border-color:#808080 #fff #fff #808080; box-shadow:inset 1px 1px 0 #404040; }
+.lv-num i { font-style:normal; color:#444; margin-left:3px; font-size:11px; }
+.lv-sum { display:flex; align-items:center; gap:8px; }
+.lv-num.big { flex:none; font-size:17px; font-weight:bold; padding:1px 8px; }
+.lv-num.lv-str { text-align:left; background:#fff; }
+.lv-cap { font-size:10px; color:#333; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.lv-cap.wrap { white-space:normal; margin-top:4px; }
+.lv-hbar { position:relative; height:10px; margin-top:3px; background:#fff; overflow:hidden; border:1px solid; border-color:#808080 #fff #fff #808080; box-shadow:inset 1px 1px 0 #404040; }
+.lv-hbar i { position:absolute; left:0; top:0; bottom:0; background:linear-gradient(#a8c8f8, #3a6fd0 55%, #23498f); }
+.lv-ticks { height:3px; margin:1px 0 0; background:repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 10%), linear-gradient(90deg, transparent calc(100% - 1px), #000 0); }
+.lv-scale { display:flex; justify-content:space-between; font-size:9px; line-height:1; }
+.lv-tankrow { display:flex; justify-content:center; gap:3px; height:46px; margin:3px 0 2px; }
+.lv-tscale { display:flex; flex-direction:column; justify-content:space-between; font-size:9px; line-height:1; text-align:right; padding-right:3px;
+  background:repeating-linear-gradient(#000 0 1px, transparent 1px 25%) right/3px 100% no-repeat, linear-gradient(transparent calc(100% - 1px), #000 0) right/3px 100% no-repeat; }
+.lv-tank { position:relative; width:22px; background:#fff; overflow:hidden; border:1px solid; border-color:#808080 #fff #fff #808080; box-shadow:inset 1px 1px 0 #404040; border-radius:0 0 3px 3px; }
+.lv-tank i { position:absolute; left:0; right:0; bottom:0; background:linear-gradient(90deg, #23498f, #a8c8f8 45%, #3a6fd0 70%, #23498f); }
+.lv-side { display:flex; align-items:center; gap:6px; } .lv-side > div { flex:1; min-width:0; }
+.lv-dial { width:70px; height:70px; flex:none; }
+.lv-dlab text { font:9px "Segoe UI",Tahoma,sans-serif; text-anchor:middle; fill:#000; }
+.lv-cbox { width:36px; height:18px; flex:none; border:1px solid; border-color:#808080 #fff #fff #808080; box-shadow:inset 1px 1px 0 #404040; }
+.lv-small { font-size:10px; color:#333; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.lv-push { display:inline-block; padding:2px 10px; border-radius:4px; font-size:10px; font-weight:bold; color:#333; border:1px solid #555;
+  background:linear-gradient(#fdfdfd, #c8c8c8); box-shadow:inset 0 1px 0 #fff, 0 1px 1px rgba(0,0,0,.3); }
+.lv-push.on { color:#073; background:linear-gradient(#b8f5b8, #44c044); box-shadow:inset 1px 1px 2px rgba(0,0,0,.4); }
+.lv-act { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.3fr); gap:8px; align-items:center; }
+.lv-panel .tools { gap:5px; }
+.lv-led.off { background:radial-gradient(circle at 35% 30%, #6a8a6a 0 10%, #1f4a1f 45%, #0c240c 100%); box-shadow:0 0 0 1px #404040; }
+.lv-ctrls .lv-line { gap:6px; flex-wrap:wrap; }
+.lv-ctl { display:inline-flex; align-items:stretch; border:1px solid; border-color:#808080 #fff #fff #808080; box-shadow:inset 1px 1px 0 #404040; background:#fff; }
+.lv-ctl input { width:62px; border:0 !important; box-shadow:none !important; text-align:right; font:13px "Segoe UI",Tahoma,sans-serif; padding:2px 2px; background:#fff; }
+.lv-ctl i { font-style:normal; padding:2px 4px 0 0; color:#444; }
+.lv-incs { display:flex; flex-direction:column; }
+.lv-panel .lv-incs button { padding:0 4px; font-size:8px; line-height:10px; height:12px; border-radius:2px; box-shadow:none; }
+.lv-panel .lv-toggle { display:inline-flex; align-items:center; gap:5px; }
+.lv-panel .lv-toggle[aria-pressed="true"] { background:linear-gradient(#c8c8c8, #e2e2e2); box-shadow:inset 1px 1px 3px rgba(0,0,0,.45); font-weight:bold; }
+.lv-toggle .lv-led { width:12px; height:12px; border-width:1px; }
+.lv-panel .lv-dump { font-weight:bold; color:#5a3b00; border-color:#7a5a10; background:linear-gradient(#fff3c8, #f2c200 55%, #d9a800); }
+.lv-panel .lv-dump:hover { background:linear-gradient(#fff8dc, #ffd84a 55%, #e6b400); }
+.lv-panel button { font:12px "Segoe UI",Tahoma,sans-serif; color:#000; padding:3px 10px; border-radius:4px; border:1px solid #5a5a5a;
+  background:linear-gradient(#fdfdfd, #dcdcdc 55%, #c6c6c6); box-shadow:inset 0 1px 0 #fff, 0 1px 1px rgba(0,0,0,.3); }
+.lv-panel button:hover { border-color:#3a5a8a; background:linear-gradient(#fff, #e6eef8 55%, #cfd9e6); }
+.lv-panel button:active { background:linear-gradient(#bdbdbd, #dcdcdc); box-shadow:inset 1px 1px 2px rgba(0,0,0,.45); }
+.lv-panel button:disabled { color:#8a8a8a; border-color:#9a9a9a; background:#dcdcdc; box-shadow:none; }
+.tools { display:flex; flex-wrap:wrap; gap:4px; align-items:center; }
+/* JTabbedPane */
+
+.tabs { display:flex; flex-wrap:wrap; gap:0; padding-left:4px; position:relative; z-index:1; }
+.tabs button { margin-right:-1px; margin-bottom:-1px; padding:3px 12px; border:1px solid var(--edge); border-bottom-color:var(--edge);
+  background:linear-gradient(#ffffff, #dde8f3); font-weight:bold; }
+.tabs button[aria-selected="true"] { background:var(--bg); border-bottom-color:var(--bg); padding-top:5px; margin-top:-2px; }
+.tabbody { flex:1 1 0; min-height:0; overflow:auto; border:1px solid var(--edge); background:var(--bg); padding:8px; }
+/* Charts: compact 3 x 2 grid that fills the tab */
+.charts { height:100%; min-height:220px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); grid-auto-rows:minmax(0,1fr); gap:14px 8px; padding-top:6px; }
+.charts[hidden] { display:none !important; }
+.charts .tb { min-height:90px; display:flex; flex-direction:column; padding:12px 6px 6px; }
+.charts .tb canvas { flex:1 1 0; height:0; min-height:0; }
+.charts .vals { gap:2px 10px; margin-bottom:4px; flex:none; }
+.charts .val b { font-size:13px; } .charts .val span { font-size:10px; }
+.charts .ldr, .charts #v-rate .val:nth-child(n+5) { display:none; }
+.charts #swatch { width:26px; height:26px; }
+.charts .tb button { padding:1px 6px; font-size:11px; }
+.vals { display:flex; flex-wrap:wrap; gap:4px 14px; margin-bottom:6px; }
+.val b { font-size:16px; font-variant-numeric:tabular-nums; display:block; }
+.val span { color:var(--mute); font-size:11px; }
 .val i { display:inline-block; width:10px; height:3px; margin-right:4px; vertical-align:middle; }
 canvas { width:100%; height:140px; display:block; }
-pre { margin:0; font:12px/1.4 ui-monospace,monospace; white-space:pre-wrap; word-break:break-all; max-height:220px; overflow:auto; color:var(--mute); }
-.wide { grid-column:1/-1; }
-.view { position:relative; height:min(62vh,560px); overflow:hidden; border-radius:8px;
-  background:radial-gradient(ellipse at 50% 60%, var(--card) 0%, var(--bg) 75%); }
-#car { width:100%; height:100%; transform:perspective(1100px) rotateX(24deg) scale(1.06); transform-origin:50% 60%; }
-.hud { position:absolute; top:10px; left:12px; right:12px; display:flex; flex-wrap:wrap; gap:6px 22px; pointer-events:none; }
-.hud .val b { font-size:24px; }
-.hud-r { position:absolute; bottom:10px; right:12px; display:flex; gap:6px; }
-.legend { position:absolute; bottom:12px; left:12px; font-size:12px; color:var(--mute); }
-#swatch { width:56px; height:56px; border-radius:10px; border:1px solid var(--line); background:var(--bg); }
+.charts canvas { background:#fff; border:1px solid var(--edge); }
+pre { margin:0; font:11px/1.4 Monaco,"Courier New",monospace; white-space:pre-wrap; word-break:break-all; max-height:220px; overflow:auto;
+  color:var(--ink); background:#fff; border:1px solid var(--edge); padding:4px; }
+#swatch { width:48px; height:48px; border:1px solid var(--edge); background:#fff; }
 [hidden] { display:none !important; }
-.motors { display:grid; grid-template-columns:150px 1fr minmax(0,320px); gap:12px; align-items:start; }
+.motors { display:grid; grid-template-columns:150px 1fr minmax(0,320px); gap:10px; align-items:start; }
 @media (max-width:900px) { .motors { grid-template-columns:120px 1fr; } .motors pre { grid-column:1/-1; } }
-.motors svg { width:100%; display:block; }
+.motors svg { width:100%; display:block; background:#fff; border:1px solid var(--edge); }
 .motors .row { margin:4px 0; }
-.hint { font-size:12px; color:var(--mute); }
+.hint { font-size:11px; color:var(--mute); }
 .ldr { display:flex; gap:8px; align-items:flex-end; }
 .ldr > div { text-align:center; font-size:11px; color:var(--mute); line-height:1.2; }
-.ldr b, .hud .ldr b { display:block; font-size:13px; color:var(--ink); font-variant-numeric:tabular-nums; }
-.ldr .bar { width:22px; height:46px; margin:0 auto 3px; border:1px solid var(--line); border-radius:4px;
-  position:relative; overflow:hidden; background:var(--bg); }
+.ldr b { display:block; font-size:12px; color:var(--ink); font-variant-numeric:tabular-nums; }
+.ldr .bar { width:20px; height:44px; margin:0 auto 3px; border:1px solid var(--edge); position:relative; overflow:hidden; background:#fff; }
 .ldr .bar i { position:absolute; left:0; right:0; bottom:0; background:#ffc828; }
-.ldr .top .bar { border-color:#ffc828; } .ldr .top b { color:#d99a00; }
+.ldr .top .bar { border-color:#d99a00; } .ldr .top b { color:#b07d00; }
 .wheel { cursor:pointer; fill:var(--ink); opacity:.75; } .wheel:hover { opacity:1; }
 .wheel.picked { fill:var(--c1); opacity:1; }
-.step { margin:8px 0; } .step b { font-weight:600; }
 .row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:6px 0; }
-button:disabled { opacity:.4; cursor:not-allowed; }
-.warn { color:var(--bad); font-weight:600; }
-kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px ui-monospace,monospace; }
-.pad button { width:36px; height:30px; padding:0; }
-.big-stop { background:var(--bad); color:#fff; border-color:var(--bad); font-weight:700; padding:6px 14px; }
-.note { font-size:12px; color:var(--mute); padding:0 16px 16px; }
-.cal-steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px; margin-bottom:8px; }
-.cal-steps button { text-align:left; padding:10px 12px; display:flex; flex-direction:column; gap:2px; }
-.cal-steps button b { font-size:14px; } .cal-steps button span { font-size:12px; color:var(--mute); }
+.warn { color:var(--bad); font-weight:bold; }
+kbd { border:1px solid var(--edge); background:#fff; padding:0 4px; font:11px Monaco,monospace; }
+.pad button { width:34px; height:26px; padding:0; }
+.big-stop { color:#fff; border-color:#8a1c1c; background:linear-gradient(#e86a6a, #c02828); }
+.big-stop:hover { border-color:#5e1010; background:linear-gradient(#f07b7b, #b02020); }
+.cal-steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:6px; margin-bottom:8px; }
+.cal-steps button { text-align:left; padding:6px 8px; display:flex; flex-direction:column; gap:2px; }
+.cal-steps button span { font-weight:normal; color:var(--mute); }
 .cal-steps button.done { border-color:var(--ok); } .cal-steps button.done span { color:var(--ok); }
 .cal-steps button.warned { border-color:var(--c1); } .cal-steps button.warned span { color:var(--c1); }
-.cal-steps button.busy { border-color:var(--c0); }
-.cal-table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
-.cal-table th, .cal-table td { text-align:right; padding:3px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
-.cal-table th:first-child, .cal-table td:first-child { text-align:left; color:var(--mute); }
-.cal-wrap { overflow-x:auto; }
-.st-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr)); gap:8px; margin:8px 0; }
-.st-card { border:1px solid var(--line); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px; }
-.st-card b { font-size:14px; } .st-card .hint { min-height:2.6em; }
-.st-card.running { border-color:var(--c0); } .st-card.reached { border-color:var(--ok); } .st-card.aborted { border-color:var(--bad); }
-.st-locate { font-size:13px; font-variant-numeric:tabular-nums; line-height:1.6; }
+.cal-steps button.busy { border-color:var(--c0); background:var(--sel); }
+/* JTable */
+.cal-wrap { overflow-x:auto; background:#fff; border:1px solid var(--edge); }
+.cal-table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+.cal-table th { background:linear-gradient(#ffffff, #dde8f3); border:1px solid #a0a0a0; padding:2px 6px; font-weight:normal; white-space:nowrap; }
+.cal-table td { text-align:right; padding:2px 6px; border:1px solid #e0e0e0; white-space:nowrap; }
+.cal-table td:first-child { text-align:left; }
+.cal-table tr:nth-child(odd) td { background:#f5f8fc; }
+.st-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr)); gap:6px; margin:8px 0; }
+.st-card { border:1px solid var(--line); background:#fff; padding:8px; display:flex; flex-direction:column; gap:6px; }
+.st-card .hint { min-height:2.6em; }
+.st-card.running { border-color:var(--c0); } .st-card.reached { border-color:var(--ok); background:#eef8f0; } .st-card.aborted { border-color:var(--bad); background:#fbeeee; }
+.st-locate { font-variant-numeric:tabular-nums; line-height:1.6; }
+/* Status bar */
+.note { margin:0; padding:3px 8px; border-top:1px solid var(--edge); background:linear-gradient(#f4f4f4,#e4e4e4); color:var(--mute); font-size:11px; }
+@media (max-width:600px) { .frame { margin:0; } .buttons { margin-left:0; } }
 </style>
 </head>
 <body>
+<div class="frame">
+<div class="titlebar"><span class="icon"></span>System Checkup · Hardware Probe<span class="wbtn"><i></i><i></i><i></i></span></div>
 <header>
-  <h1>Hardware probe — live</h1>
-  <span class="row" style="margin:0">
-    <select id="port" style="font:inherit;padding:4px 6px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)"></select>
-    <button id="connect">Connect</button><button id="disconnect">Disconnect</button>
-    <button id="bt-repair" title="Remove and pair the robot's Bluetooth module again (PIN 1234), then connect to it">Re-pair Bluetooth</button>
-  </span>
+  <label class="l" for="port">Port:</label><select id="port"></select>
+  <button id="connect">Connect</button><button id="disconnect">Disconnect</button>
+  <button id="bt-repair" title="Remove and pair the robot's Bluetooth module again (PIN 1234), then connect to it">Re-pair BT</button>
+  <span class="sep"></span>
   <span class="badge" id="link">connecting…</span>
   <span class="badge" id="age">no data</span>
-  <span class="badge" id="btn" title="Start button on A10 (to GND). Shows PRESSED for 1.5 s after any press, even a short tap">start button: —</span>
-  <span class="badge" title="Motors only run during SPIN or while WASD keys are held; the robot stops itself 0.4 s after the last drive command">motors: hold-to-drive, auto-stop</span>
-  <form id="mark" class="buttons" style="margin-left:0">
-    <input id="mark-text" placeholder="Mark test, e.g. beacon left off" style="font:inherit;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink);min-width:220px">
-    <button>Mark</button>
-  </form>
-  <div class="buttons">
-    <button data-c="GYROZERO" title="Robot must be still for 2 s">Zero gyro</button>
-    <button data-c="HEADING0">Angles → 0</button>
-    <button data-c="GYROINIT">Re-detect gyro</button>
-    <button data-c="PROBE">I²C scan</button>
-    <button data-c="STOP">STOP</button>
-  </div>
+  <div class="buttons"><button class="big-stop" data-c="STOP" title="Stops drive motors, tests and the stepper">■ STOP</button></div>
 </header>
-<main>
-  <section class="wide"><h2>Car view (live yaw from gyro Z, ultrasonic beams at ±45°, front and both sides)</h2>
+<div class="layout">
+  <section class="left"><h2>Car view</h2>
     <div class="view"><canvas id="car"></canvas>
       <div class="hud">
         <div class="val"><b id="h-yaw">—</b><span>yaw (CCW +)</span></div>
         <div class="val"><b id="h-rate">—</b><span>yaw rate °/s</span></div>
-        <div class="val"><b id="h-l">—</b><span>left 45°</span></div>
-        <div class="val"><b id="h-r">—</b><span>right 45°</span></div>
-        <div class="val"><b id="h-f">—</b><span>front</span></div>
-        <div class="val"><b id="h-sl">—</b><span>left side</span></div>
-        <div class="val"><b id="h-sr">—</b><span>right side</span></div>
-        <div class="val"><b id="h-col">—</b><span>floor colour (confidence)</span></div>
-        <div class="val"><div id="h-ldr"></div><span>light level, left → right</span></div>
+        <div class="val"><b id="h-col">—</b><span>floor colour</span></div>
       </div>
-      <div class="legend">Grid rings every 0.5 m · scroll to zoom · car outline and sensor positions not yet measured</div>
-      <div class="hud-r"><button id="flip" style="pointer-events:auto">Yaw sign: −Z</button></div>
+      <div class="legend">Rings every 0.5 m · scroll to zoom · drag to orbit</div>
+      <div class="hud-r"><button id="cam-top" title="Straight down">Top</button><button id="cam-3d" title="Tilted view">3D</button><button id="cam-reset" title="Also: double-click the view">Reset view</button><button id="flip">Yaw sign: −Z</button></div>
     </div>
   </section>
-  <section class="wide"><h2>Competition calibration: record poses</h2>
-    <div class="cal-steps" id="cal-steps"></div>
-    <div class="row"><input id="cal-note" placeholder="Note saved with the next capture (optional): measured position, heading, lights on/off…"
-        style="font:inherit;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink);flex:1;min-width:240px"></div>
-    <div class="row hint" id="cal-status">Place the robot, let it settle, then click the pose. It records every sensor for 5 s: keep hands and the robot still.</div>
-    <div class="cal-wrap"><table class="cal-table" id="cal-table"></table></div>
-    <div class="hint" id="cal-file"></div>
-  </section>
-  <section class="wide"><h2>Tournament step test</h2>
-    <div class="hint">Each Run sends one step that the robot carries out on its own (heading by gyro at 200 Hz, ranges at ~10 Hz).
-      Targets are the recorded readings of each checkpoint (calibration panel: P, N, N turned left/right, both boxes). Needs: all four wheels identified, "Wheels lifted / area clear" ticked,
-      gyro zeroed. Speed = the drive slider (capped at 150). <kbd>Space</kbd> or STOP cancels.</div>
-    <div class="st-grid">
-      <div class="st-card" id="st-c0"><b>00 · Locate</b><div class="st-locate" id="st-locate">waiting for data…</div></div>
-      <div class="st-card" id="st-c1"><b>01 · Centre at P</b><span class="hint" id="st-s1">Matches P's recorded front and side readings, then a ±3° probe fixes the heading from the recorded 45° readings. Stores it as the reference.</span><button id="st-r1">Run 01</button></div>
-      <div class="st-card" id="st-c2"><b>02 · Straight to N</b><span class="hint" id="st-s2">Holds the reference heading straight to N, matches N's readings, probes the heading again.</span><button id="st-r2">Run 02</button></div>
-      <div class="st-card" id="st-c3"><b>03 · Turn by colour</b><span class="hint" id="st-s3">Green → left, red → right: gyro turn of 90°, then it aligns to the recorded "N turned" checkpoint, so the final heading does not rely on the gyro.</span><button id="st-r3">Run 03</button></div>
-      <div class="st-card" id="st-c4"><b>04 · Park</b><span class="hint" id="st-s4">Into the box on the turned side on the aligned heading, until its readings match the box capture.</span><button id="st-r4">Run 04</button></div>
-    </div>
-    <div class="row"><button class="big-stop" id="st-stop">■ STOP</button>
-      <label>Min power <input type="range" id="st-min" min="30" max="120" value="55"> <span id="st-min-v">55</span>/255</label>
-      <span class="hint">the lowest power that still moves the robot; raise it if a step stops short and times out</span></div>
-    <div class="hint" id="st-msg"></div>
-  </section>
-  <section><h2>LDRs A0 · A2 · A7 · A6 (left → right, ADC: higher = brighter)</h2><div class="vals" id="v-light"></div><canvas id="g-light"></canvas></section>
-  <section><h2>Ultrasonic (mm, gaps = no echo)</h2><div class="vals" id="v-us"></div><canvas id="g-us"></canvas></section>
-  <section><h2>Gyro angle (°, integrated since zero)</h2><div class="vals" id="v-ang"></div><canvas id="g-ang"></canvas></section>
-  <section><h2>Gyro rate (°/s) &amp; accel</h2><div class="vals" id="v-rate"></div><canvas id="g-rate"></canvas></section>
-  <section><h2>Colour sensor (edges / 6.9 ms per filter, 20% scaling)</h2>
-    <div class="vals"><div id="swatch"></div><div class="val"><b id="col-name">—</b><span id="col-note">—</span></div>
-      <button id="ref-green" title="Green paper under the sensor, then click">Set green ref</button>
-      <button id="ref-red" title="Red paper under the sensor, then click">Set red ref</button></div>
-    <div class="vals" id="v-col"></div><canvas id="g-col"></canvas></section>
-  <section><h2>Events</h2><pre id="events"></pre></section>
-  <section><h2>Data buffer</h2>
-    <div class="vals">
-      <div class="val"><b id="buf-rows">0</b><span>samples</span></div>
-      <div class="val"><b id="buf-events">0</b><span>events</span></div>
-      <div class="val"><b id="buf-span">—</b><span>time covered</span></div>
-      <div class="val"><b id="buf-state">recording</b><span id="buf-note">since page load</span></div>
-    </div>
-    <div class="row"><button id="buf-pause">Pause</button><button id="buf-clear">Clear</button>
-      <button id="buf-save">Save as .txt</button></div>
-    <div class="hint">Tab-separated, one sample per row; events and marks are interleaved as <code>#</code> lines.
-      Keeps the newest 200,000 lines.</div>
-  </section>
-  <section class="wide"><h2>Motors</h2>
+  <section class="check"><h2>Sensors &amp; actuators</h2><div class="check-body lv-panel">
+    <div class="lv-sum" id="ck-summary"></div>
+    <div id="ck-groups"></div>
+    <div class="lv-frame"><span class="lv-flabel">Actuators</span>
+      <div class="lv-act"><div id="ck-stepper"></div>
+        <div class="lv-ctrls">
+          <div class="lv-label">Target angle, limit 0–130° (▲▼ = 1°, hold to repeat; type + Enter)</div>
+          <div class="lv-line">
+            <span class="lv-ctl"><span class="lv-incs"><button id="sp-up" title="+1° (hold to repeat)">▲</button><button id="sp-dn" title="−1° (hold to repeat)">▼</button></span><input id="sp-target" type="text" inputmode="numeric" value="0" aria-label="Target angle in degrees"><i>°</i></span>
+            <button id="sp-lock" class="lv-toggle" aria-pressed="false" title="Keep the driver energised so the shaft holds its position"><span class="lv-led off"></span>Lock</button>
+            <button id="sp-setzero" title="Make the current position 0°">Set zero</button>
+          </div>
+          <div class="tools"><button id="sp-dump" class="lv-dump" title="Go to 130°, the top of the allowed travel">▲ Dump (130°)</button>
+            <button id="sp-zero" title="Go back to 0°">▼ Lower (0°)</button>
+            <button id="sp-test" title="30° away from where it is, then back (stays inside 0–130°)">Test ±30°</button></div>
+          <div class="lv-cap wrap" id="sp-msg">Open loop: the position is counted steps, not measured. Lock keeps it trustworthy; when free the shaft can be turned by hand.</div>
+        </div></div></div>
+    <div class="lv-frame"><span class="lv-flabel">Gyro &amp; bus</span>
+      <div class="tools"><button data-c="GYROZERO" title="Robot must be still for 2 s">Zero gyro</button>
+        <button data-c="HEADING0">Angles → 0</button><button data-c="GYROINIT">Re-detect gyro</button><button data-c="PROBE">I²C scan</button></div></div>
+  </div></section>
+<div class="tabpane">
+  <div class="tabs" role="tablist">
+    <button role="tab" data-tab="t-charts" aria-selected="true">Live charts</button>
+    <button role="tab" data-tab="t-motors" aria-selected="false">Motors &amp; drive</button>
+    <button role="tab" data-tab="t-steps" aria-selected="false">Step test</button>
+    <button role="tab" data-tab="t-cal" aria-selected="false">Calibration</button>
+    <button role="tab" data-tab="t-events" aria-selected="false">Events &amp; buffer</button>
+  </div>
+  <div class="tabbody">
+  <div id="t-charts" class="charts">
+    <div class="tb"><h2>LDRs A0 · A2 · A7 · A6 (left → right)</h2><div class="vals" id="v-light"></div><canvas id="g-light"></canvas></div>
+    <div class="tb"><h2>Ultrasonic (mm, gaps = no echo)</h2><div class="vals" id="v-us"></div><canvas id="g-us"></canvas></div>
+    <div class="tb"><h2>Gyro angle (°, since zero)</h2><div class="vals" id="v-ang"></div><canvas id="g-ang"></canvas></div>
+    <div class="tb"><h2>Gyro rate (°/s) &amp; accel</h2><div class="vals" id="v-rate"></div><canvas id="g-rate"></canvas></div>
+    <div class="tb"><h2>Colour sensor</h2>
+      <div class="vals"><div id="swatch"></div><div class="val"><b id="col-name">—</b><span id="col-note">—</span></div>
+        <button id="ref-green" title="Green paper under the sensor, then click">Set green ref</button>
+        <button id="ref-red" title="Red paper under the sensor, then click">Set red ref</button></div>
+      <div class="vals" id="v-col"></div><canvas id="g-col"></canvas></div>
+  </div>
+  <div id="t-motors" hidden>
     <div class="motors">
       <svg viewBox="-50 0 400 380" aria-label="Robot top view, front at top">
         <polygon points="150,8 185,58 160,58 160,84 140,84 140,58 115,58" fill="var(--c0)"/>
         <text x="150" y="102" text-anchor="middle" fill="var(--c0)" font-size="14" font-weight="700">FRONT</text>
-        <rect x="80" y="115" width="140" height="230" rx="22" fill="var(--c0)" opacity=".25" stroke="var(--c0)"/>
+        <rect x="80" y="115" width="140" height="230" fill="var(--c0)" opacity=".25" stroke="var(--c0)"/>
         <g id="wheels"></g>
       </svg>
       <div>
@@ -187,19 +289,59 @@ kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px 
         <div class="row pad">
           <button data-k="q">Q</button><button data-k="w">W</button><button data-k="e">E</button>
           <button data-k="a">A</button><button data-k="s">S</button><button data-k="d">D</button>
-          <button id="linear" title="Same as holding Shift" style="width:auto">⇧ Linear: off</button>
+          <button id="linear" title="Same as holding Shift" style="width:auto;padding:0 8px">⇧ Linear: off</button>
           <span id="drive-state" class="hint">drive off</span></div>
         <div class="row"><b>Link test</b><button id="tt-start" disabled
             title="Robot turns 180° and back, 4 times, on its own using the gyro. Needs floor space and the wheel map.">Turn 180° and back ×4</button>
           <span id="tt-state" class="hint">Runs on the Mega, so it keeps turning through a link blackout. Space / STOP cancels.</span></div>
         <div class="hint"><kbd>W</kbd>/<kbd>S</kbd> fwd/back · <kbd>A</kbd>/<kbd>D</kbd> turn · <kbd>Q</kbd>/<kbd>E</kbd> strafe ·
-          hold <kbd>⇧</kbd> for linear (A/D strafe, no rotation) · <kbd>Space</kbd> stop · auto-stop 0.4 s after the last command</div>
+          hold <kbd>⇧</kbd> for linear · <kbd>Space</kbd> stop · auto-stop 0.4 s after the last command</div>
       </div>
       <pre id="map-out"></pre>
     </div>
-  </section>
-</main>
-<p class="note" id="log"></p>
+  </div>
+  <div id="t-steps" hidden>
+    <div class="hint">Each Run sends one step that the robot carries out on its own. Targets are the recorded readings of each checkpoint
+      (Calibration tab). Needs all four wheels identified, "Wheels lifted / area clear" ticked, gyro zeroed. <kbd>Space</kbd> or STOP cancels.</div>
+    <div class="st-grid">
+      <div class="st-card" id="st-c0"><b>00 · Locate</b><div class="st-locate" id="st-locate">waiting for data…</div></div>
+      <div class="st-card" id="st-c1"><b>01 · Centre at P</b><span class="hint" id="st-s1">Matches P's recorded readings, then a ±3° probe fixes the heading. Stores it as the reference.</span><button id="st-r1">Run 01</button></div>
+      <div class="st-card" id="st-c2"><b>02 · Straight to N</b><span class="hint" id="st-s2">Holds the reference heading straight to N, matches N's readings, probes the heading again.</span><button id="st-r2">Run 02</button></div>
+      <div class="st-card" id="st-c3"><b>03 · Turn by colour</b><span class="hint" id="st-s3">Green → left, red → right: gyro turn of 90°, then aligns to the recorded "N turned" checkpoint.</span><button id="st-r3">Run 03</button></div>
+      <div class="st-card" id="st-c4"><b>04 · Park</b><span class="hint" id="st-s4">Into the box on the turned side until its readings match the box capture.</span><button id="st-r4">Run 04</button></div>
+    </div>
+    <div class="row"><button class="big-stop" id="st-stop">■ STOP</button>
+      <label>Min power <input type="range" id="st-min" min="30" max="120" value="55"> <span id="st-min-v">55</span>/255</label>
+      <span class="hint">lowest power that still moves the robot</span></div>
+    <div class="hint" id="st-msg"></div>
+  </div>
+  <div id="t-cal" hidden>
+    <div class="cal-steps" id="cal-steps"></div>
+    <div class="row"><input id="cal-note" placeholder="Note saved with the next capture (optional)" style="flex:1;min-width:240px"></div>
+    <div class="row hint" id="cal-status">Place the robot, let it settle, then click the pose. It records every sensor for 5 s: keep hands and the robot still.</div>
+    <div class="cal-wrap"><table class="cal-table" id="cal-table"></table></div>
+    <div class="hint" id="cal-file"></div>
+  </div>
+  <div id="t-events" hidden>
+    <form id="mark" class="row" style="margin-top:0">
+      <input id="mark-text" placeholder="Mark test, e.g. beacon left off" style="flex:1;min-width:220px"><button>Mark</button>
+    </form>
+    <pre id="events"></pre>
+    <div class="vals" style="margin-top:10px">
+      <div class="val"><b id="buf-rows">0</b><span>samples</span></div>
+      <div class="val"><b id="buf-events">0</b><span>events</span></div>
+      <div class="val"><b id="buf-span">—</b><span>time covered</span></div>
+      <div class="val"><b id="buf-state">recording</b><span id="buf-note">since page load</span></div>
+    </div>
+    <div class="row"><button type="button" id="buf-pause">Pause</button><button type="button" id="buf-clear">Clear</button>
+      <button type="button" id="buf-save">Save as .txt</button>
+      <span class="hint">Tab-separated, one sample per row; events and marks as <code>#</code> lines. Keeps the newest 200,000 lines.</span></div>
+  </div>
+  </div>
+</div>
+</div>
+<p class="note" id="log">Ready.</p>
+</div>
 <script>
 const WINDOW_MS = 60000, $ = id => document.getElementById(id);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -243,7 +385,7 @@ function sample(s) {
     while (series[id].length && t - series[id][0].t > WINDOW_MS) series[id].shift();
   }
   const g = s.gyro || {};
-  values('light', s.light, ldrMeter(s.light)); $('h-ldr').innerHTML = ldrMeter(s.light); values('us', s.ultrasonic_mm.map(v => v > 0 ? v : null));
+  values('light', s.light, ldrMeter(s.light)); values('us', s.ultrasonic_mm.map(v => v > 0 ? v : null));
   values('ang', g.angle_deg || [], `<div class="val"><b>${g.bias_valid === 0 ? 'NOT ZEROED' : g.angles_valid ? 'valid' : 'INVALID'}</b>` +
     `<span>${g.bias_valid === 0 ? 'hold still ~2 s: zeroes itself' : g.model || 'no gyro'}</span></div>`);
   values('rate', g.rate_dps || [], `<div class="val"><b>${(g.accel_raw || []).join(' / ') || '—'}</b><span>accel raw X/Y/Z</span></div>` +
@@ -313,7 +455,7 @@ const CAR = { w:230, l:300 };                 // mm, nominal until measured
 // Firmware index order: left 45, right 45, front, left side, right side; a = deg CCW from forward.
 const SENSORS = [{ x:-95, y:150, a:45 }, { x:95, y:150, a:-45 }, { x:0, y:150, a:0 }, { x:-115, y:0, a:90 }, { x:115, y:0, a:-90 }];
 const BEAM_HALF = 15, NO_ECHO_MM = 4000;
-let VIEW_MM = 1200;  // scroll on the view to zoom 0.5-4 m
+let VIEW_MM = 550;  // scroll on the view to zoom 0.3-4 m
 let latest = null, shownYaw = 0, yawSign = -1;  // chip Z points down: expect yaw = -Z (unconfirmed)
 try { yawSign = Number(localStorage.getItem('yawSign')) || -1; } catch {}
 const flipBtn = $('flip');
@@ -322,79 +464,191 @@ showSign();
 flipBtn.onclick = () => { yawSign = -yawSign; showSign(); try { localStorage.setItem('yawSign', yawSign); } catch {} };
 function rangeColour(mm) { return mm < 150 ? css('--bad') : mm < 400 ? css('--c1') : css('--c0'); }
 function yawNow() { const z = latest && latest.gyro && latest.gyro.angle_deg; return z ? yawSign * z[2] : 0; }
+// ---- 3D car view: a small perspective renderer on the 2D canvas (no library). ----
+// World: x right, y = heading 0 (where the gyro was zeroed), z up, mm. The robot sits at the origin and
+// turns by the measured yaw; the camera orbits it (cam.az) and tilts from straight down (cam.tilt = 0).
+const CAM_DEFAULT = { az:0, tilt:55 };
+let cam = { ...CAM_DEFAULT };
+try { cam = { ...CAM_DEFAULT, ...JSON.parse(localStorage.getItem('camView')) }; } catch {}
+function applyCam(save = true) {
+  cam.tilt = Math.max(0, Math.min(80, cam.tilt)); cam.az = ((cam.az % 360) + 540) % 360 - 180;
+  if (save) try { localStorage.setItem('camView', JSON.stringify(cam)); } catch {}
+}
+applyCam(false);
+const LIGHT_DIR = (() => { const v = [-0.45, -0.55, 0.75], n = Math.hypot(...v); return v.map(c => c / n); })();
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgb(${[(n >> 16) & 255, (n >> 8) & 255, n & 255].map(v => Math.round(Math.min(255, v * f))).join(',')})`;
+}
+// Dump bed: tilts about the hinge at its rear bottom edge, driven by the stepper angle (bedTilt below).
+const BED_HINGE = { y:-CAR.l * 0.5, z:58 };
+const BED = (() => {
+  const W = CAR.w, L = CAR.l, f = [], bedF = L * 0.17, bedB = -L * 0.5;
+  f.push(...box(-W / 2, W / 2, bedB, bedF, 58, 70, '#c98200'));                                        // floor
+  for (const sx of [-1, 1]) f.push(...box(sx > 0 ? W / 2 - 10 : -W / 2, sx > 0 ? W / 2 : -W / 2 + 10, bedB, bedF, 70, 140, '#e09a10'));  // side walls
+  f.push(...box(-W / 2, W / 2, bedF - 12, bedF, 70, 182, '#d48a00'));                                  // headboard
+  f.push(...box(-W / 2, W / 2, bedF - 12, L * 0.3, 176, 184, '#c07a00'));                              // cab protector
+  f.push(...box(-W / 2 + 10, W / 2 - 10, bedB, bedB + 8, 70, 132, '#b87400'));                          // tailgate
+  return f;
+})();
+// Stepper angle -> bed tilt. The gearing is not modelled: 0..130 deg of stepper (its software travel)
+// maps linearly onto 0..BED_MAX_TILT deg of bed. Change BED_MAX_TILT to match the real bed.
+const BED_MAX_TILT = 55;
+let shownBed = 0;
+function tiltBed(t) {   // rotate the bed faces about the hinge (x axis); front goes up for t > 0
+  const c = Math.cos(t), sn = Math.sin(t), rot = ([x, y, z]) => { const dy = y - BED_HINGE.y, dz = z - BED_HINGE.z;
+    return [x, BED_HINGE.y + dy * c - dz * sn, BED_HINGE.z + dy * sn + dz * c]; };
+  return BED.map(f => ({ ...f, p:f.p.map(rot), n:[f.n[0], f.n[1] * c - f.n[2] * sn, f.n[1] * sn + f.n[2] * c] }));
+}
+// Faces in the robot frame (x right, y forward, z up). Each face: points, outward normal, colour.
+function box(x0, x1, y0, y1, z0, z1, col, extra = {}) {
+  const P = (x, y, z) => [x, y, z];
+  return [
+    { p:[P(x0,y0,z1),P(x1,y0,z1),P(x1,y1,z1),P(x0,y1,z1)], n:[0,0,1], col, ...extra },
+    { p:[P(x0,y1,z0),P(x1,y1,z0),P(x1,y1,z1),P(x0,y1,z1)], n:[0,1,0], col, ...extra },
+    { p:[P(x0,y0,z0),P(x1,y0,z0),P(x1,y0,z1),P(x0,y0,z1)], n:[0,-1,0], col, ...extra },
+    { p:[P(x0,y0,z0),P(x0,y1,z0),P(x0,y1,z1),P(x0,y0,z1)], n:[-1,0,0], col, ...extra },
+    { p:[P(x1,y0,z0),P(x1,y1,z0),P(x1,y1,z1),P(x1,y0,z1)], n:[1,0,0], col, ...extra },
+  ];
+}
+function wheel(cx0, cy0, r, half) {   // 10-sided tyre on an axle along x
+  const faces = [], N = 10, ring = a => [cy0 + r * Math.cos(a), r + r * Math.sin(a)];
+  for (const sx of [-1, 1]) faces.push({ p:[...Array(N)].map((_, i) => { const [y, z] = ring(2 * Math.PI * i / N); return [cx0 + sx * half, y, z]; }),
+    n:[sx, 0, 0], col:'#3a3a3a', hub:[cx0 + sx * half, cy0, r] });
+  for (let i = 0; i < N; ++i) {
+    const a0 = 2 * Math.PI * i / N, a1 = 2 * Math.PI * (i + 1) / N, m = (a0 + a1) / 2, [y0, z0] = ring(a0), [y1, z1] = ring(a1);
+    faces.push({ p:[[cx0 - half, y0, z0], [cx0 + half, y0, z0], [cx0 + half, y1, z1], [cx0 - half, y1, z1]], n:[0, Math.cos(m), Math.sin(m)], col:'#262626' });
+  }
+  return faces;
+}
+const TRUCK = (() => {
+  const W = CAR.w, L = CAR.l, f = [];
+  for (const ay of [L * 0.31, -L * 0.17, -L * 0.36]) for (const sx of [-1, 1]) f.push(...wheel(sx * (W / 2 - 4), ay, 30, 15));
+  f.push(...box(-W * 0.32, W * 0.32, -L * 0.48, L * 0.5, 28, 50, '#4a4a4a'));                          // chassis
+  f.push(...box(-W / 2 + 8, W / 2 - 8, L * 0.5 - 8, L * 0.5 + 6, 40, 62, '#6b6b6b'));                  // bumper
+  f.push(...box(-W * 0.44, W * 0.44, L * 0.2, L * 0.5 - 4, 50, 160, '#f2c200'));                       // cab
+  f.push(...box(-W * 0.38, W * 0.38, L * 0.24, L * 0.46, 160, 168, '#ffd84a'));                        // roof
+  f.push({ p:[[-W*0.36,L*0.5-3,112],[W*0.36,L*0.5-3,112],[W*0.36,L*0.5-3,152],[-W*0.36,L*0.5-3,152]], n:[0,1,0], col:'#6f9ccc' });  // windscreen
+  for (const sx of [-1, 1]) f.push({ p:[[sx*W*0.44+sx*0.5,L*0.3,115],[sx*W*0.44+sx*0.5,L*0.46,115],[sx*W*0.44+sx*0.5,L*0.46,150],[sx*W*0.44+sx*0.5,L*0.3,150]], n:[sx,0,0], col:'#6f9ccc' });
+  f.push(...box(W * 0.3, W * 0.38, L * 0.22, L * 0.26, 160, 205, '#333333'));                          // exhaust stack
+  f.push(...box(-W * 0.36, W * 0.36, -L * 0.5, -L * 0.46, 40, 58, '#4a4a4a'));                       // hinge beam
+  SENSORS.forEach(s => f.push(...box(s.x - 12, s.x + 12, s.y - 12, s.y + 12, 64, 92, '#5a6670')));    // ultrasonic pods
+  return f;
+})();
 function drawCar() {
   const c = $('car'), dpr = devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
   if (c.width !== w * dpr || c.height !== h * dpr) { c.width = w * dpr; c.height = h * dpr; }
   const x = c.getContext('2d'); x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, w, h);
-  const cx = w / 2, cy = h * 0.62, k = Math.min(w / 2, h * 0.62) / VIEW_MM;  // px per mm
-  // Fixed world grid; heading 0 (where the gyro was zeroed) points up.
-  x.strokeStyle = css('--line'); x.fillStyle = css('--mute'); x.font = '11px system-ui'; x.lineWidth = 1;
-  for (let r = 500; r <= VIEW_MM + 1000; r += 500) {
-    x.beginPath(); x.arc(cx, cy, r * k, 0, 2 * Math.PI); x.stroke();
-    if (r <= VIEW_MM) x.fillText((r / 1000).toFixed(1) + ' m', cx + 4, cy - r * k - 3);
-  }
-  x.beginPath(); x.moveTo(cx, cy - VIEW_MM * k * 1.3); x.lineTo(cx, cy + VIEW_MM * k); x.moveTo(cx - w, cy); x.lineTo(cx + w, cy); x.stroke();
-  x.fillText('0° (zero heading)', cx + 4, 14);
-  // Smoothly follow the measured yaw along the shortest way round.
   const target = yawNow(); shownYaw += ((target - shownYaw + 540) % 360 - 180) * 0.25;
-  x.save(); x.translate(cx, cy); x.rotate(-shownYaw * Math.PI / 180); x.scale(k, -k);  // y up, CCW positive
+  // Camera
+  const D = VIEW_MM * 4, el = (90 - cam.tilt) * Math.PI / 180, se = Math.sin(el), ce = Math.cos(el);
+  const az = cam.az * Math.PI / 180, ca = Math.cos(az), sa = Math.sin(az);
+  const cx = w / 2, cy = h * (0.5 + 0.08 * cam.tilt / 80), F = Math.min(w / 2, h * 0.55) / VIEW_MM * D;
+  const camPos = (() => { const X = 0, Y = -D * ce, Z = D * se; return [X * ca - Y * sa, X * sa + Y * ca, Z]; })();
+  const proj = ([px, py, pz]) => {   // world -> screen [sx, sy, depth]
+    const X = px * ca + py * sa, Y = -px * sa + py * ca;   // undo the orbit
+    const up = Y * se + pz * ce, depth = Y * ce - pz * se + D;
+    return depth < 40 ? null : [cx + X * F / depth, cy - up * F / depth, depth];
+  };
+  const yr = shownYaw * Math.PI / 180, cyw = Math.cos(yr), syw = Math.sin(yr);
+  const toWorld = ([px, py, pz]) => [px * cyw - py * syw, px * syw + py * cyw, pz];
+  const path = pts => { let pen = false; x.beginPath(); for (const p of pts) { const s = proj(p); if (!s) { pen = false; continue; } pen ? x.lineTo(s[0], s[1]) : x.moveTo(s[0], s[1]); pen = true; } };
+  // Floor: rings every 0.5 m, cross axes, the zero-heading line.
+  x.lineWidth = 1; x.strokeStyle = css('--line'); x.fillStyle = css('--mute'); x.font = '11px system-ui';
+  for (let r = 500; r <= VIEW_MM + 1000; r += 500) {
+    path([...Array(73)].map((_, i) => [r * Math.cos(i * Math.PI / 36), r * Math.sin(i * Math.PI / 36), 0])); x.stroke();
+    const t = proj([4, r, 0]); if (t && r <= VIEW_MM) x.fillText((r / 1000).toFixed(1) + ' m', t[0] + 4, t[1] - 3);
+  }
+  const R = VIEW_MM + 1000;
+  path([[-R, 0, 0], [R, 0, 0]]); x.stroke(); path([[0, -R, 0], [0, R, 0]]); x.stroke();
+  const zl = proj([0, VIEW_MM * 1.25, 0]); if (zl) x.fillText('0° (zero heading)', zl[0] + 4, zl[1]);
+  // Ultrasonic beams on the floor, from each sensor out to its range.
   const us = latest ? latest.ultrasonic_mm : [-1, -1, -1, -1, -1];
+  const beamPt = (s, ang, len) => toWorld([s.x - Math.sin(ang) * len, s.y + Math.cos(ang) * len, 0]);
   SENSORS.forEach((s, i) => {
-    const mm = us[i], ok = mm > 0, len = ok ? mm : Math.min(NO_ECHO_MM, VIEW_MM * 1.4);
-    const a0 = (90 + s.a - BEAM_HALF) * Math.PI / 180, a1 = (90 + s.a + BEAM_HALF) * Math.PI / 180;
-    x.beginPath(); x.moveTo(s.x, s.y); x.arc(s.x, s.y, len, a0, a1); x.closePath();
+    const mm = us[i], ok = mm > 0, len = ok ? mm : Math.min(NO_ECHO_MM, VIEW_MM * 1.4), arc = [];
+    for (let d = -BEAM_HALF; d <= BEAM_HALF; d += 3) arc.push(beamPt(s, (s.a + d) * Math.PI / 180, len));
+    const o = toWorld([s.x, s.y, 0]);
     if (ok) {
-      const g = x.createRadialGradient(s.x, s.y, 0, s.x, s.y, len), col = rangeColour(mm);
-      g.addColorStop(0, col + '10'); g.addColorStop(1, col + '70'); x.fillStyle = g; x.fill();
-      x.beginPath(); x.arc(s.x, s.y, len, a0, a1); x.strokeStyle = col; x.lineWidth = 6 / k * 0.6; x.stroke();
-    } else {
-      x.setLineDash([40, 40]); x.strokeStyle = css('--mute'); x.lineWidth = 1.5 / k; x.stroke(); x.setLineDash([]);
-    }
+      const col = rangeColour(mm), a = proj(o), b = proj(beamPt(s, s.a * Math.PI / 180, len));
+      path([o, ...arc]); x.closePath();
+      if (a && b) { const g = x.createLinearGradient(a[0], a[1], b[0], b[1]); g.addColorStop(0, col + '10'); g.addColorStop(1, col + '80'); x.fillStyle = g; }
+      else x.fillStyle = col + '40';
+      x.fill(); path(arc); x.strokeStyle = col; x.lineWidth = 3; x.stroke();
+    } else { path([o, arc[0]]); x.setLineDash([6, 6]); x.strokeStyle = css('--mute'); x.lineWidth = 1; x.stroke(); path([o, arc.at(-1)]); x.stroke(); x.setLineDash([]); }
   });
-  // Body, wheels, windscreen-style nose.
-  x.fillStyle = css('--ink'); x.globalAlpha = 0.85;
-  for (const [wx, wy] of [[-1, 1], [1, 1], [-1, -1], [1, -1]]) x.fillRect(wx * (CAR.w / 2 + 6) - 18, wy * CAR.l * 0.3 - 40, 36, 80);
-  x.globalAlpha = 1; x.fillStyle = css('--c0');
-  x.beginPath(); x.roundRect(-CAR.w / 2, -CAR.l / 2, CAR.w, CAR.l, 40); x.fill();
-  x.fillStyle = css('--card'); x.globalAlpha = 0.35;
-  x.beginPath(); x.moveTo(-CAR.w * 0.32, CAR.l * 0.18); x.lineTo(CAR.w * 0.32, CAR.l * 0.18); x.lineTo(CAR.w * 0.24, CAR.l * 0.36); x.lineTo(-CAR.w * 0.24, CAR.l * 0.36); x.fill();
-  x.globalAlpha = 1;
-  // LDRs (A0, A2, A7, A6) along the front edge, left to right. Glow is relative to the
-  // last minute's range so small differences show; the brightest one is outlined.
-  const adc = latest ? latest.light : null, top = adc ? adc.indexOf(Math.max(...adc)) : -1;
+  // Shadow under the truck.
+  path([[-CAR.w / 2 - 10, -CAR.l / 2 - 10, 0], [CAR.w / 2 + 10, -CAR.l / 2 - 10, 0], [CAR.w / 2 + 10, CAR.l / 2 + 15, 0], [-CAR.w / 2 - 10, CAR.l / 2 + 15, 0]].map(toWorld));
+  x.fillStyle = 'rgba(0,0,0,0.12)'; x.fill();
+  // Truck + live parts: LDR headlights (glow = relative brightness) and a roof beacon in the floor colour.
+  const st = latest && latest.stepper, bedWant = st ? Math.max(0, Math.min(1, st.pos_deg / STEP_MAX)) * BED_MAX_TILT : 0;
+  shownBed += (bedWant - shownBed) * 0.2;
+  // Hydraulic ram from the chassis to under the bed, drawn first so the bed covers its top end.
+  const ramTop = (() => { const t = shownBed * Math.PI / 180, dy = CAR.l * 0.05 - BED_HINGE.y, dz = 0;
+    return [0, BED_HINGE.y + dy * Math.cos(t) - dz * Math.sin(t), BED_HINGE.z + dy * Math.sin(t) + dz * Math.cos(t)]; })();
+  const r0 = proj(toWorld([0, -CAR.l * 0.1, 40])), r1 = proj(toWorld(ramTop));
+  if (r0 && r1 && shownBed > 1) { x.strokeStyle = '#8a8f96'; x.lineWidth = 7; x.lineCap = 'round'; x.beginPath(); x.moveTo(r0[0], r0[1]); x.lineTo(r1[0], r1[1]); x.stroke();
+    x.strokeStyle = '#c9ced4'; x.lineWidth = 3; x.stroke(); x.lineCap = 'butt'; }
+  const adc = latest ? latest.light : null, top = adc ? adc.indexOf(Math.max(...adc)) : -1, faces = [...TRUCK, ...tiltBed(shownBed * Math.PI / 180)];
   (adc || [null, null, null, null]).forEach((v, i) => {
     const px = -CAR.w * 0.36 + i * CAR.w * 0.24, rel = lightRel(v);
-    x.save(); x.shadowColor = LIGHT; x.shadowBlur = 40 * rel;
-    x.fillStyle = `rgba(255,200,40,${0.08 + 0.92 * rel})`; x.fillRect(px - 22, CAR.l / 2 - 34, 44, 30); x.restore();
-    x.strokeStyle = i === top ? LIGHT : css('--card'); x.lineWidth = i === top ? 6 : 3;
-    x.strokeRect(px - 22, CAR.l / 2 - 34, 44, 30);
+    faces.push(...box(px - 16, px + 16, CAR.l / 2 + 6, CAR.l / 2 + 9, 44, 60,
+      '#ffc828', { glow:rel, alpha:0.25 + 0.75 * rel, flat:true, edge:i === top ? '#b07d00' : null }));
   });
-  // Colour sensor under the front: patch of the colour it currently sees.
-  x.beginPath(); x.arc(0, CAR.l * 0.05, 34, 0, 2 * Math.PI);
-  x.fillStyle = colour ? `rgb(${colour.rgb})` : css('--card'); x.fill();
-  x.strokeStyle = css('--card'); x.lineWidth = 6; x.stroke();
-  x.restore();
-  // Range labels at each beam's end, drawn upright.
-  x.font = '600 13px system-ui';
+  const beacon = colour ? '#' + colour.rgb.map(v => v.toString(16).padStart(2, '0')).join('') : '#9aa4ad';
+  faces.push(...box(-14, 14, CAR.l * 0.33, CAR.l * 0.41, 168, 188, beacon, { glow:colour ? colour.confidence : 0, flat:true }));
+  const drawn = [];
+  for (const f of faces) {
+    const n = toWorld(f.n), wp = f.p.map(toWorld);
+    const ctr = wp.reduce((a, p) => [a[0] + p[0] / wp.length, a[1] + p[1] / wp.length, a[2] + p[2] / wp.length], [0, 0, 0]);
+    if (n[0] * (camPos[0] - ctr[0]) + n[1] * (camPos[1] - ctr[1]) + n[2] * (camPos[2] - ctr[2]) <= 0) continue;   // facing away
+    const sp = wp.map(proj); if (sp.some(p => !p)) continue;
+    drawn.push({ f, sp, depth:sp.reduce((a, p) => a + p[2], 0) / sp.length, light:n[0] * LIGHT_DIR[0] + n[1] * LIGHT_DIR[1] + n[2] * LIGHT_DIR[2] });
+  }
+  drawn.sort((a, b) => b.depth - a.depth);
+  for (const { f, sp, light } of drawn) {
+    x.beginPath(); sp.forEach((p, i) => i ? x.lineTo(p[0], p[1]) : x.moveTo(p[0], p[1])); x.closePath();
+    x.save();
+    if (f.glow) { x.shadowColor = f.col; x.shadowBlur = 24 * f.glow; }
+    x.globalAlpha = f.alpha ?? 1;
+    x.fillStyle = f.flat ? f.col : shade(f.col, 0.62 + 0.45 * Math.max(0, light)); x.fill();
+    x.restore();
+    x.strokeStyle = f.edge || 'rgba(0,0,0,0.25)'; x.lineWidth = f.edge ? 2 : 0.6; x.stroke();
+  }
+  // Range labels at each beam's end, upright.
+  x.font = '600 13px system-ui'; x.textAlign = 'center';
   SENSORS.forEach((s, i) => {
-    const mm = us[i], ok = mm > 0, len = Math.min(ok ? mm : VIEW_MM * 1.1, VIEW_MM * 1.1) + 120;
-    const a = (90 + s.a + shownYaw) * Math.PI / 180, r = shownYaw * Math.PI / 180;
-    const sx = s.x * Math.cos(r) - s.y * Math.sin(r), sy = s.x * Math.sin(r) + s.y * Math.cos(r);
-    const px = cx + (sx + Math.cos(a) * len) * k, py = cy - (sy + Math.sin(a) * len) * k;
-    x.fillStyle = ok ? rangeColour(mm) : css('--mute'); x.textAlign = 'center';
-    x.fillText(ok ? mm + ' mm' : 'no echo', px, py); x.textAlign = 'start';
+    const mm = us[i], ok = mm > 0, len = Math.min(ok ? mm : VIEW_MM * 1.1, VIEW_MM * 1.1) + 120, p = proj(beamPt(s, s.a * Math.PI / 180, len));
+    if (!p) return;
+    x.fillStyle = ok ? rangeColour(mm) : css('--mute'); x.fillText(ok ? mm + ' mm' : 'no echo', p[0], p[1]);
   });
+  x.textAlign = 'start';
   const g = latest && latest.gyro;
   $('h-yaw').textContent = g && g.angle_deg ? fmt(target, 1) + '°' + (g.angles_valid ? '' : ' (invalid)') : '—';
   $('h-rate').textContent = g && g.rate_dps ? fmt(yawSign * g.rate_dps[2], 1) : '—';
-  $('h-l').textContent = us[0] > 0 ? us[0] + ' mm' : 'no echo'; $('h-r').textContent = us[1] > 0 ? us[1] + ' mm' : 'no echo';
-  [['h-f', 2], ['h-sl', 3], ['h-sr', 4]].forEach(([id, i]) => $(id).textContent = us[i] > 0 ? us[i] + ' mm' : us[i] == null ? '—' : 'no echo');
   $('h-col').textContent = colour ? `${colour.name} ${Math.round(100 * colour.confidence)}%` : '—';
   $('h-col').style.color = colour ? `rgb(${colour.rgb})` : '';
   requestAnimationFrame(drawCar);
 }
+{
+  const view = $('car').parentElement; let drag = null;
+  view.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || e.target.closest('button')) return;
+    drag = { x:e.clientX, y:e.clientY, az:cam.az, tilt:cam.tilt }; view.setPointerCapture(e.pointerId); view.classList.add('dragging');
+  });
+  view.addEventListener('pointermove', e => {
+    if (!drag) return;
+    cam.az = drag.az - (e.clientX - drag.x) * 0.4; cam.tilt = drag.tilt - (e.clientY - drag.y) * 0.3; applyCam(false);
+  });
+  const end = () => { if (!drag) return; drag = null; view.classList.remove('dragging'); applyCam(); };
+  view.addEventListener('pointerup', end); view.addEventListener('pointercancel', end);
+  view.addEventListener('dblclick', e => { if (!e.target.closest('button')) { cam = { ...CAM_DEFAULT }; applyCam(); } });
+}
+$('cam-top').onclick = () => { cam.tilt = 0; applyCam(); };
+$('cam-3d').onclick = () => { cam.tilt = 55; applyCam(); };
+$('cam-reset').onclick = () => { cam = { ...CAM_DEFAULT }; applyCam(); };
 $('car').parentElement.addEventListener('wheel', e => { e.preventDefault();
-  VIEW_MM = Math.min(4000, Math.max(500, VIEW_MM * (e.deltaY > 0 ? 1.1 : 0.9))); }, { passive:false });
+  VIEW_MM = Math.min(4000, Math.max(300, VIEW_MM * (e.deltaY > 0 ? 1.1 : 0.9))); }, { passive:false });
 requestAnimationFrame(drawCar);
 
 // ---- Data buffer: every received line, saved on request as a tab-separated text file --
@@ -459,6 +713,7 @@ async function poll() {
       if (line.type === 'sample') {
         // Uptime going backwards = the Mega rebooted (ready lines are not sent over Bluetooth).
         if (latest && line.ms < latest.ms) {
+          rebootAt = new Date(line.received_at).getTime() || Date.now();   // when it happened, not when this page loaded the backlog
           const msg = `ROBOT REBOOTED at ${new Date().toLocaleTimeString()} (cause: ${line.boot || 'unknown'})`;
           event({ seq: 0, received_at: new Date().toISOString(), note: msg }); mark(msg);
           if ($('drive-on').checked) { $('drive-on').checked = false; stopDrive(true); }
@@ -466,7 +721,7 @@ async function poll() {
         } else if (latest) linkGap(latest, line);
         sample(line); latest = line; lastSample = Date.now(); showTurnTest(line.turntest);
         if (line.start_btn) lastPress = Date.now();
-      } else { event(line); stEvent(line); }
+      } else { event(line); stEvent(line); stepperEvent(line); }
       if (line.type && line.type.startsWith('turntest')) showTurnTest(null, line);
       if (line.type === 'ready' && $('drive-on').checked) {
         $('drive-on').checked = false; stopDrive();
@@ -484,9 +739,6 @@ async function poll() {
   }
   $('age').textContent = age == null ? 'no data' : age < 2 ? 'live' : `stale ${age.toFixed(0)} s`;
   $('age').className = 'badge ' + (age != null && age < 2 ? 'ok' : 'bad');
-  const pressed = Date.now() - lastPress < 1500;
-  $('btn').textContent = 'start button: ' + (lastSample ? (pressed ? 'PRESSED' : 'released') : '—');
-  $('btn').className = 'badge ' + (pressed ? 'ok' : '');
   for (const id in charts) draw(id);
   showBuffer();
   setTimeout(poll, 100);  // samples arrive at 5 Hz
@@ -849,6 +1101,166 @@ function stEvent(line) {
     (ok && line.kind === 'go' ? ' · heading stored as reference' : ''));
 }
 
+// ---- System checkup, drawn as a LabVIEW front panel: one cluster per sensor or actuator with a round LED
+// (green = working, red = not), a numeric/string indicator, a bar, tank, gauge or knob, and the reason. ----
+// Ultrasonics, LDRs and the colour sensor use the firmware's own self-check ("chk", the same one the OLED
+// shows): bit k = ultrasonic k (a valid echo in the last 10 s), bits 5-8 = adc[0..3] (not stuck at a rail),
+// bit 9 = colour (red, green and blue all count).
+const US_BLOCKS = [[3, 'US left side'], [0, 'US left 45°'], [2, 'US front'], [1, 'US right 45°'], [4, 'US right side']];  // left → right
+const LDR_BLOCKS = [[0, 'A0'], [2, 'A2'], [1, 'A7'], [3, 'A6']];  // [adc index, pin], left → right
+const US_FULL_MM = 2000;
+let rebootAt = 0, stepperNote = '', spTarget = null, spTest = null;   // spTest: { base, back } during the ±30° test
+const STEP_MIN = 0, STEP_MAX = 130;   // stepper travel in degrees from the set zero; the firmware refuses moves outside it too
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' })[c]);
+const chkBit = (s, k) => s && s.chk != null ? ((s.chk >> k) & 1) === 1 : null;
+const clock = t => new Date(t).toLocaleTimeString();
+// Front-panel parts
+const led = (ok, big) => `<span class="lv-led ${ok ? 'g' : 'r'}${big ? ' big' : ''}"></span>`;
+const num = (v, unit = '') => `<span class="lv-num">${esc(v)}${unit ? `<i>${esc(unit)}</i>` : ''}</span>`;
+const pct = f => Math.round(100 * Math.max(0, Math.min(1, f || 0)));
+const hbar = f => `<div class="lv-hbar"><i style="width:${pct(f)}%"></i></div><div class="lv-ticks"></div><div class="lv-scale"><span>0</span><span>1</span><span>2 m</span></div>`;
+const tank = f => `<div class="lv-tankrow"><div class="lv-tscale"><span>100</span><span>50</span><span>0</span></div><div class="lv-tank"><i style="height:${pct(f)}%"></i></div></div>`;
+function dial(deg, labels, knob, range) {   // gauge (white face, red needle) or knob (grey body, pointer); deg CCW + for the gauge, CW for the knob
+  let t = '';
+  for (let i = 0; i < 36; ++i) { const a = i * 10 * Math.PI / 180, r1 = knob ? 47 : 41, r2 = i % 3 ? r1 - 3 : r1 - 6;
+    t += `<line x1="${(r1 * Math.sin(a)).toFixed(1)}" y1="${(-r1 * Math.cos(a)).toFixed(1)}" x2="${(r2 * Math.sin(a)).toFixed(1)}" y2="${(-r2 * Math.cos(a)).toFixed(1)}"/>`; }
+  const lab = labels.map(([txt, a]) => { const r = knob ? 0 : 29, rad = a * Math.PI / 180;
+    return knob ? '' : `<text x="${(r * Math.sin(rad)).toFixed(1)}" y="${(-r * Math.cos(rad) + 3.5).toFixed(1)}">${txt}</text>`; }).join('');
+  const rot = knob ? deg : -deg;
+  return `<svg class="lv-dial" viewBox="-50 -50 100 100" aria-hidden="true"><defs>
+    <radialGradient id="lvBezel" cx="35%" cy="30%"><stop offset="0" stop-color="#fafafa"/><stop offset="1" stop-color="#8c8c8c"/></radialGradient>
+    <radialGradient id="lvKnob" cx="40%" cy="35%"><stop offset="0" stop-color="#f4f4f4"/><stop offset=".7" stop-color="#b9b9b9"/><stop offset="1" stop-color="#7d7d7d"/></radialGradient></defs>
+    ${knob ? `${range ? arcBand(range[0], range[1]) : ''}<g stroke="#000" stroke-width="1">${t}</g><circle r="38" fill="url(#lvKnob)" stroke="#555"/><circle r="28" fill="none" stroke="#9a9a9a"/>
+      <g transform="rotate(${rot.toFixed(1)})"><line y1="-6" y2="-35" stroke="#1d3f73" stroke-width="4" stroke-linecap="round"/></g>`
+    : `<circle r="49" fill="url(#lvBezel)" stroke="#555"/><circle r="43" fill="#fff" stroke="#666"/><g stroke="#000" stroke-width="1">${t}</g>
+      <g class="lv-dlab">${lab}</g><g transform="rotate(${rot.toFixed(1)})"><line y1="6" y2="-38" stroke="#d01010" stroke-width="2.4"/></g>
+      <circle r="5" fill="url(#lvKnob)" stroke="#444"/>`}</svg>`;
+}
+function arcBand(a0, a1) {   // allowed travel on the knob's scale, clockwise from the top
+  const r = 44, p = a => [(r * Math.sin(a * Math.PI / 180)).toFixed(1), (-r * Math.cos(a * Math.PI / 180)).toFixed(1)], [x0, y0] = p(a0), [x1, y1] = p(a1);
+  return `<path d="M${x0} ${y0} A${r} ${r} 0 ${a1 - a0 > 180 ? 1 : 0} 1 ${x1} ${y1}" fill="none" stroke="#2fbf55" stroke-width="5"/>` +
+    `<line x1="${x1}" y1="${y1}" x2="${(x1 * 1.1).toFixed(1)}" y2="${(y1 * 1.1).toFixed(1)}" stroke="#c03030" stroke-width="2"/>`;
+}
+function item(name, ok, body, why, cls = '') {
+  return { name, ok, html:`<div class="lv-item ${cls}"><div class="lv-label">${esc(name)}</div>${body}<div class="lv-cap" title="${esc(why)}">${esc(why)}</div></div>` };
+}
+const line = (ok, v, unit) => `<div class="lv-line">${led(ok)}${num(v, unit)}</div>`;
+const frame = (title, items, cls = '') => `<div class="lv-frame"><span class="lv-flabel">${esc(title)}</span><div class="lv-grid ${cls}">${items.map(b => b.html).join('')}</div></div>`;
+function checkup() {
+  const s = latest, live = !!lastSample && Date.now() - lastSample < 2000, NO = 'no live data';
+  const linkOk = $('link').className.includes('ok'), viaBt = s && s.link === 'bt', all = [], out = [];
+  const add = (title, items, cls) => { all.push(...items); out.push(frame(title, items, cls)); };
+  // Link & controller
+  const uptime = s ? s.ms / 1000 : null;
+  add('Link & controller', [
+    item('Serial link', linkOk, line(linkOk, linkOk ? (viaBt ? 'Bluetooth' : 'USB') : 'down'), $('link').textContent),
+    item('Telemetry', live, line(live, live ? 'live' : $('age').textContent), live ? (viaBt ? '5 Hz over Bluetooth' : '5 Hz over USB') : 'no sample for 2 s'),
+    item('Mega', live && Date.now() - rebootAt > 60000, line(live && Date.now() - rebootAt > 60000, uptime == null ? '—' : uptime < 120 ? uptime.toFixed(0) : (uptime / 60).toFixed(0), uptime == null ? '' : uptime < 120 ? 's' : 'min'),
+      !live ? NO : Date.now() - rebootAt <= 60000 ? `rebooted at ${clock(rebootAt)} (${s.boot || 'unknown'})` : `boot: ${s.boot || 'unknown'}`),
+  ]);
+  // Ultrasonics: LED, mm readout, horizontal bar 0-2 m
+  add('Ultrasonic rangers (left → right)', US_BLOCKS.map(([k, name]) => {
+    const mm = s && s.ultrasonic_mm ? s.ultrasonic_mm[k] : null, ok = live && (chkBit(s, k) ?? mm > 0);
+    return item(name, ok, line(ok, mm > 0 ? mm : mm == null ? '—' : 'no echo', mm > 0 ? 'mm' : '') + hbar(mm > 0 ? mm / US_FULL_MM : 0),
+      !live ? NO : ok ? 'echo in the last 10 s' : 'no echo 10 s: wave a hand');
+  }), 'five');
+  // LDRs: LED, %, vertical tank
+  add('Light sensors (left → right)', LDR_BLOCKS.map(([i, pin]) => {
+    const v = s && s.adc ? s.adc[i] : null, ok = live && (chkBit(s, 5 + i) ?? (v >= 10 && v <= 1010));
+    return item(`LDR ${pin}`, ok, line(ok, v == null ? '—' : Math.round(100 * v / 1023), '%') + tank(v == null ? 0 : v / 1023),
+      !live ? NO : ok ? `ADC ${v}` : `ADC ${v}: stuck at a rail`);
+  }), 'four');
+  // Gyro gauge, colour box, start button
+  const g = (s && s.gyro) || {}, gyroOk = live && !!g.model && g.bias_valid !== 0 && !!g.angles_valid;
+  const gyroWhy = !live ? NO : !g.model ? 'not found on I²C: Re-detect' : g.bias_valid === 0 ? 'not zeroed: keep still 2 s' :
+    !g.angles_valid ? 'angles invalid: Angles → 0' : `${g.model} · ${g.bus_errors ?? 0} bus errors`;
+  const yaw = g.angle_deg ? yawNow() : 0;
+  const rgbc = s && s.color_rgbc, colOk = live && (chkBit(s, 9) ?? !!(rgbc && rgbc[0] && rgbc[1] && rgbc[2]));
+  const pressed = Date.now() - lastPress < 1500, btnOk = live && lastPress > 0;
+  add('Heading · colour · controls', [
+    item('Gyro yaw (IMU)', gyroOk, `<div class="lv-side">${dial(yaw, [['0', 0], ['90', -90], ['180', 180], ['-90', 90]])}<div>${line(gyroOk, g.angle_deg ? fmt(yaw, 1) : '—', '°')}</div></div>`, gyroWhy, 'wide'),
+    item('Colour sensor', colOk, line(colOk, colour ? `${colour.name} ${Math.round(100 * colour.confidence)}%` : '—') +
+      `<div class="lv-line"><span class="lv-cbox" style="background:${colour ? `rgb(${colour.rgb})` : '#fff'}"></span><span class="lv-small">${rgbc ? `R ${rgbc[0]} G ${rgbc[1]} B ${rgbc[2]}` : ''}</span></div>`,
+      !live ? NO : colOk ? 'all channels count' : 'a channel reads 0: check S0–S3, OUT D32'),
+    item('Start button (A15)', btnOk, line(btnOk, !lastSample ? '—' : pressed ? 'PRESSED' : 'released') +
+      `<div class="lv-line"><span class="lv-push${pressed ? ' on' : ''}">START</span></div>`,
+      !live ? NO : lastPress ? `press seen ${clock(lastPress)}` : 'not tested: press it once'),
+  ]);
+  // Stepper: open loop, so "working" = the firmware has it and the last move sent every step.
+  const st = s && s.stepper;
+  let spOk = false, spWhy;
+  if (!live) spWhy = NO;
+  else if (!st) spWhy = 'firmware has no stepper: flash hardware_probe_mega';
+  else if (st.busy) { spOk = true; spWhy = 'moving…'; }
+  else if (!st.moves) spWhy = 'not tested: press Test ±30°';
+  else if (st.aborted || st.made !== st.want) spWhy = `last move cut short: ${st.made}/${st.want} steps`;
+  else { spOk = true; spWhy = `last move: all ${Math.abs(st.want)} steps sent` + (stepperNote ? ` · ${stepperNote}` : ''); }
+  if (live && st) spWhy = (st.hold ? 'LOCKED · ' : 'free · ') + spWhy;
+  const spItem = item('Stepper (D44–46)', spOk, `<div class="lv-side">${dial(st ? st.pos_deg : 0, [], true, [STEP_MIN, STEP_MAX])}<div>${line(spOk, st ? fmt(st.pos_deg, 1) : '—', '°')}</div></div>`, spWhy, 'wide');
+  all.push(spItem);
+  // Render
+  $('ck-groups').innerHTML = out.join('');
+  $('ck-stepper').innerHTML = spItem.html;
+  const bad = all.filter(b => !b.ok);
+  $('ck-summary').innerHTML = `${led(!bad.length, true)}<span class="lv-num big">${all.length - bad.length} / ${all.length}</span>` +
+    `<span class="lv-num lv-str">${esc(bad.length ? 'Needs attention: ' + bad.map(b => b.name).join(', ') : 'All systems OK')}</span>`;
+  ['sp-dump', 'sp-test', 'sp-zero', 'sp-up', 'sp-dn', 'sp-target', 'sp-lock', 'sp-setzero'].forEach(id => $(id).disabled = !live || !st);
+  if (st) {
+    $('sp-lock').setAttribute('aria-pressed', st.hold ? 'true' : 'false');
+    $('sp-lock').querySelector('.lv-led').className = 'lv-led ' + (st.hold ? 'g' : 'off');
+    if (spTarget == null && document.activeElement !== $('sp-target')) $('sp-target').value = Math.round(st.pos_deg);
+  }
+}
+setInterval(checkup, 250); checkup();
+// Stepper: absolute targets ("STEPPER TO deg"), so 1° nudges never accumulate step rounding (1° = 8.9 steps).
+// A new target replaces a move still running; the firmware pauses samples while it steps.
+const spPos = () => { const st = latest && latest.stepper; return st ? st.pos_deg : 0; };
+function stepperTo(deg, note) {
+  const want = Math.round(deg); deg = Math.max(STEP_MIN, Math.min(STEP_MAX, want));
+  if (deg !== want) note = `limited to ${deg}° (travel is ${STEP_MIN}–${STEP_MAX}°)`;
+  spTarget = deg; if (document.activeElement !== $('sp-target')) $('sp-target').value = deg;
+  $('sp-msg').textContent = note || `moving to ${deg}°…`;
+  command('STEPPER TO ' + deg);
+}
+const nudge = d => { spTest = null; stepperTo((spTarget ?? Math.round(spPos())) + d); };
+function stepperEvent(line) {
+  if (line.error === 'BAD_STEPPER') { spTest = null; $('sp-msg').textContent = 'Refused by the robot (BAD_STEPPER).'; return; }
+  if (line.error === 'BAD_STEPPER_LIMIT') { spTest = null; spTarget = null; $('sp-msg').textContent = `Refused: outside ${line.min_deg}–${line.max_deg}° (now at ${line.pos_deg}°). Set zero first if the position is wrong.`; return; }
+  if (line.error === 'UNKNOWN_COMMAND_NO_MOTION' && /moving|lock|zero/i.test($('sp-msg').textContent)) {
+    $('sp-msg').textContent = 'The robot does not know this STEPPER command: flash the updated hardware_probe_mega firmware.'; spTest = null; return; }
+  if (line.type === 'stepper_hold') { $('sp-msg').textContent = line.hold ? 'Locked: the shaft holds its position (driver stays on and gets warm).' : 'Free: the driver is off; the shaft can be turned by hand.'; return; }
+  if (line.type === 'stepper_zero') { spTarget = 0; $('sp-target').value = 0; $('sp-msg').textContent = 'Zero set: this position is now 0°.'; return; }
+  if (line.type !== 'stepper_done') return;
+  const full = !line.aborted && line.made === line.want;
+  if (line.aborted) return;   // replaced by a newer target (or STOP); the next stepper_done reports the result
+  $('sp-msg').textContent = full ? `at ${line.pos_deg}° (${line.made} steps)` : `cut short: ${line.made}/${line.want} steps`;
+  if (spTest && full && !spTest.back) { spTest.back = true; stepperTo(spTest.base, `test: back to ${spTest.base}°…`); return; }
+  if (spTest) { stepperNote = full ? 'test ±30° passed' : ''; spTest = null; }
+}
+{ // ▲▼: one degree per click, repeating while held
+  let timer = null;
+  const stop = () => { clearTimeout(timer); clearInterval(timer); timer = null; };
+  for (const [id, d] of [['sp-up', 1], ['sp-dn', -1]]) {
+    const b = $(id);
+    b.onpointerdown = e => { e.preventDefault(); if (b.disabled) return; nudge(d); stop(); timer = setTimeout(() => { timer = setInterval(() => nudge(d), 120); }, 400); };
+    b.onpointerup = b.onpointerleave = b.onpointercancel = stop;
+  }
+}
+$('sp-target').onkeydown = e => {
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); nudge(e.key === 'ArrowUp' ? 1 : -1); }
+  if (e.key === 'Enter') { const v = Number($('sp-target').value); if (Number.isFinite(v)) { spTest = null; stepperTo(v); } else $('sp-msg').textContent = 'Type a whole number of degrees.'; }
+};
+$('sp-lock').onclick = () => { const st = latest && latest.stepper; command('STEPPER HOLD ' + (st && st.hold ? 0 : 1)); };
+$('sp-setzero').onclick = () => { spTest = null; command('STEPPER ZERO'); $('sp-msg').textContent = 'setting zero…'; };
+$('sp-test').onclick = () => { const base = spTarget ?? Math.round(spPos()), to = base + 30 <= STEP_MAX ? base + 30 : base - 30;
+  spTest = { base, back:false }; stepperNote = ''; stepperTo(to, `test: to ${to}°…`); spTarget = base; };
+$('sp-dump').onclick = () => { spTest = null; stepperTo(STEP_MAX, `dumping: to ${STEP_MAX}°…`); };
+$('sp-zero').onclick = () => { spTest = null; stepperTo(0); };
+
+// ---- Tabbed pane (Swing JTabbedPane look) ----
+document.querySelectorAll('[role=tab]').forEach(t => t.onclick = () => {
+  document.querySelectorAll('[role=tab]').forEach(o => { o.setAttribute('aria-selected', o === t); $(o.dataset.tab).hidden = o !== t; });
+});
 poll();
 </script>
 </body>

@@ -29,7 +29,21 @@ static const double WALL_Y = 1300;                  // main wall; the light at (
 static const double N_Y = WALL_Y - 414;             // N: front 264 + 150 sensor offset
 static const double TURN_Y = WALL_Y - 335;          // turned captures and boxes: side 215 + 120
 static const double XL = -745, XR = 796;            // side walls
-static const double SIDE_DEPTH = getenv("SIDE_DEPTH") ? atof(getenv("SIDE_DEPTH")) : 485, SIDE_FROM = WALL_Y - SIDE_DEPTH;
+static double SIDE_DEPTH = getenv("SIDE_DEPTH") ? atof(getenv("SIDE_DEPTH")) : 485, SIDE_FROM = WALL_Y - SIDE_DEPTH;
+// field variation per run (DR=1, for the tuner): side-wall depth, start-arc centre, beam width, drift
+static bool dr = getenv("DR") != 0;
+static double arcCy = getenv("ARC_CY") ? atof(getenv("ARC_CY")) : 210;
+static double coneMax = getenv("CONE_MAX") ? atof(getenv("CONE_MAX")) : 15;
+static double ioSettle = 1;   // fast profile: settle / pre-measure waits scaled (main.cpp would need the same)
+static int ioScans = 3;        // scans per measure (median of 3, or mean of 2)
+// front beam: a wall echoes straight back only within FRONT_INC deg of square (field 3 Nov, IMG_4001: 12 deg
+// toward the wall read 1037 = the wall at ~43 deg; at 55 / 67 deg it read the far corner, 1726 / 1718)
+static double frontInc = getenv("FRONT_INC") ? atof(getenv("FRONT_INC")) : 38;
+// starts up to ARC_MAX deg out on the arc (IMG_4001: placed ~57 deg out, pointing 65 deg off square)
+static double arcMax = getenv("ARC_MAX") ? atof(getenv("ARC_MAX")) : 45;
+// longest echo the sensors return (US_MAX: the real ones may see nothing from the start semicircle)
+static double usMax = getenv("US_MAX") ? atof(getenv("US_MAX")) : 2500;
+static double driftScale = getenv("DRIFT") ? atof(getenv("DRIFT")) : 1;
 static const double FRONT_LEN = 150, REAR_LEN = 130, HALF_W = 120;   // body from the turning centre
 static const double BOX_LX = XL + FRONT_LEN + 52, BOX_RX = XR - FRONT_LEN - 55;
 struct Mount { double fwd, left, deg, cone, inc; };
@@ -44,7 +58,10 @@ static double uni(double lo, double hi) { return lo + (hi - lo) * urand(); }
 static double gauss() { return sqrt(-2 * log(urand() + 1e-12)) * cos(2 * PI * urand()); }
 
 struct Seg { double x1, y1, x2, y2; };
-static const Seg WALLS[3] = {{XL, WALL_Y, XR, WALL_Y}, {XL, SIDE_FROM, XL, WALL_Y}, {XR, SIDE_FROM, XR, WALL_Y}};
+// the main wall's panel runs on past the side walls (video IMG_4001: ~1/3 of a panel beyond the right one)
+static const double MAIN_EXT = getenv("MAIN_EXT") ? atof(getenv("MAIN_EXT")) : 400;
+static Seg WALLS[3] = {{XL - MAIN_EXT, WALL_Y, XR + MAIN_EXT, WALL_Y}, {XL, SIDE_FROM, XL, WALL_Y}, {XR, SIDE_FROM, XR, WALL_Y}};
+static void setSideDepth(double d) { SIDE_DEPTH = d; SIDE_FROM = WALL_Y - d; WALLS[1].y1 = WALLS[2].y1 = SIDE_FROM; }
 
 // Distance along a ray to the first wall, -1 if none; *inc = incidence (deg from square) at that wall.
 static double ray(double px, double py, double ang, double* inc) {
@@ -83,7 +100,7 @@ static double senseOne(const Pose& p, int k) {
     double inc, w = ray(sx, sy, atan2(-dx, dy), &inc);
     if (fabs(a) * 180 / PI <= m.cone && w > d - 30 && (best < 0 || d < best)) best = d;
   }
-  return best > 2500 || best < 20 ? -1 : best;
+  return best > usMax || best < 20 ? -1 : best;
 }
 
 // One noisy ping: 4 mm noise, 5 % no echo, `spurious` chance of a stray echo.
@@ -104,7 +121,7 @@ struct Chassis {
     strafeEff = uni(0.6, 0.8); mmPerDeg = (wheelGain * (62 - 36.5)) / 0.096 * uni(0.9, 1.1);
     coast[0] = uni(0.3, 0.55); coast[1] = uni(0.05, 0.12); coast[2] = uni(0.04, 0.09);
     tauAcc = uni(0.04, 0.08); tauBrake = uni(0.02, 0.04);
-    cplY = 0.05 * uni(0.5, 1.5); cplX = 0.008 * uni(0.5, 1.5) * (getenv("DRIFT") ? atof(getenv("DRIFT")) : 1);   // deg per mm: strafe CCW, forward CW
+    cplY = 0.05 * uni(0.5, 1.5); cplX = 0.008 * uni(0.5, 1.5) * driftScale;   // deg per mm: strafe CCW, forward CW
     gyroScale = 1 + uni(-0.01, 0.01); gyroZero = 30 * gauss();   // hand test: 90 deg read 90.4-90.8
     ticksPerMm = 1.3;
   }
@@ -129,11 +146,13 @@ class Sim : public rl::Io {
   double ticksF = 0;
   double u = 0, target = 0, v[3] = {0, 0, 0}, moveGain = 1, wNow[4] = {0, 0, 0, 0};
   int cmdX = 0, cmdY = 0, cmdW = 0;
+  double rampUp = 8;   // main.cpp rampUp: PWM per 10 ms while a wheel speeds up
   enum Mode { OFF, RUN, BRAKE } mode = OFF;
   double motorOnMs = 0;
   Pose atStep[5];
   double stepT[5] = {0, 0, 0, 0, 0};
   bool reachedStep[5] = {false, false, false, false, false};
+  int parkStrafes = 0, parkTurns = 0, parkDrives = 0, moves4 = 0;
 
   void setMix(int8_t x, int8_t y, int8_t w) { cmdX = x; cmdY = y; cmdW = w; }
   // Firmware applyMix: wheel = x -+ y -+ w (FL FR RL RR), u = wheel / peak, |u| < 0.05 off, else
@@ -156,7 +175,8 @@ class Sim : public rl::Io {
       u = 0;
       for (int q = 0; q < 4; ++q) {
         double tq = wheelTarget(q), d = tq - wNow[q];
-        wNow[q] += fabs(d) < 0.8 * dt ? d : (d > 0 ? 0.8 * dt : -0.8 * dt);
+        double rate = (fabs(tq) > fabs(wNow[q]) && (wNow[q] == 0 || (wNow[q] > 0) == (tq > 0)) ? rampUp : 8) / 10.0;   // PWM per ms
+        wNow[q] += fabs(d) < rate * dt ? d : (d > 0 ? rate * dt : -rate * dt);
         double m = fabs(wNow[q]) - c.wheelStall;
         sp[q] = m > 0 ? (wNow[q] > 0 ? 1 : -1) * c.wheelGain * moveGain * m : 0;
         if (fabs(wNow[q]) > u) u = fabs(wNow[q]);
@@ -197,16 +217,16 @@ class Sim : public rl::Io {
     }
   }
   bool measure(int16_t us[rl::NUS], float* rg) override {
-    run(100);
+    run(100 * ioSettle);
     double scans[3][5];
-    for (int s = 0; s < 3; ++s) {
+    for (int s = 0; s < ioScans; ++s) {
       run(120);
       for (int k = 0; k < 5; ++k) scans[s][k] = ping(p, k, 0.02);
     }
     for (int k = 0; k < 5; ++k) {
       double q[3];
       int n = 0;
-      for (int s = 0; s < 3; ++s) if (scans[s][k] > 0) q[n++] = scans[s][k];
+      for (int s = 0; s < ioScans; ++s) if (scans[s][k] > 0) q[n++] = scans[s][k];
       double lo = 1e9, hi = -1e9;
       for (int i = 0; i < n; ++i) { lo = q[i] < lo ? q[i] : lo; hi = q[i] > hi ? q[i] : hi; }
       if (n < 2 || hi - lo > 40) { us[k] = -1; continue; }
@@ -226,7 +246,7 @@ class Sim : public rl::Io {
     while (u > 0) step(5);
     mode = BRAKE; run(60);
     motorsOff();
-    run(150);
+    run(150 * ioSettle);
     return moves < 900;
   }
   bool sweep(int8_t dir, uint8_t pwm, uint16_t ms, float* yaws, int16_t* fronts, uint8_t maxN, uint8_t* n) override {
@@ -250,7 +270,7 @@ class Sim : public rl::Io {
     while (u > 0) { step(5); t += 5; }
     mode = BRAKE; run(60);
     motorsOff();
-    run(250);
+    run(250 * ioSettle);
     return moves < 900;
   }
   int drvPolls = 0, drvFocus = 0;
@@ -286,7 +306,7 @@ class Sim : public rl::Io {
   bool driveEnd() override {
     mode = BRAKE; run(120);
     motorsOff();
-    run(350);
+    run(350 * ioSettle);
     return true;
   }
   bool yaw(float* deg) override {
@@ -295,6 +315,8 @@ class Sim : public rl::Io {
   }
   uint16_t lost() override { return lostCount; }
   uint32_t ticks() override { return uint32_t(ticksF); }
+  uint32_t ms() override { return uint32_t(simMs); }
+  void setRamp(uint8_t up) override { rampUp = up; }
   bool turnTicks(int8_t dir, uint8_t pwm, uint32_t want, uint16_t ms, uint32_t* got) override {
     ++moves;
     double t0 = ticksF;
@@ -306,12 +328,13 @@ class Sim : public rl::Io {
     while (u > 0) step(5);
     mode = BRAKE; run(60);
     motorsOff();
-    run(250);
+    run(250 * ioSettle);
     *got = uint32_t(ticksF - t0);
     return moves < 900;
   }
   void event(const char* name, int16_t a, int16_t b, int16_t cc, int16_t d) override {
     if (tracing) tEvents.push_back({simMs / 1000.0, name, a, b, cc, d});
+    if (reachedStep[4]) { parkStrafes += !strcmp(name, "strafe"); parkTurns += !strcmp(name, "rotate"); parkDrives += !strcmp(name, "drive") || !strcmp(name, "move"); }
     if (!strcmp(name, "step") && a >= 1 && a <= 4) { atStep[a] = p; reachedStep[a] = true; stepT[a] = simMs / 1000.0; }
     if (verbose) printf("    %-24s %6d %6d %6d %6d   x %5.0f y %5.0f psi %6.1f  t %5.1fs\n", name, a, b, cc, d, p.x, p.y - N_Y, p.psi * 180 / PI, simMs / 1000.0);
   }
@@ -335,16 +358,17 @@ static void makeCal(rl::Calib& cal) {
   cal.redMilli = 1737;
 }
 
-struct Result { double st[5]; bool ok, good, collided, left, wantLeft; double ex, ey, epsi, t; const char* why; Pose start, atN; bool reachedN; };
+struct Result { int strafes, turns, drives; double st[5]; bool ok, good, collided, left, wantLeft; double ex, ey, epsi, t; const char* why; Pose start, atN; bool reachedN; };
 static Result runOne(double arcDeg, double r, double aimErr, bool green, bool verbose) {
   rl::Calib cal;
   makeCal(cal);
   Sim sim;
   sim.c.draw();
-  MOUNT[rl::FRONT].cone = uni(7, getenv("CONE_MAX") ? atof(getenv("CONE_MAX")) : 15);   // the real beam width is not known: drawn per run
+  if (dr) { setSideDepth(uni(420, 560)); arcCy = uni(0, 250); coneMax = uni(10, 20); driftScale = uni(0.5, 2.5); arcDeg += uni(-3.75, 3.75); }
+  MOUNT[rl::FRONT].cone = uni(7, coneMax);   // the real beam width is not known: drawn per run
+  MOUNT[rl::FRONT].inc = frontInc;
   sim.verbose = verbose;
   // the start arc's centre: ARC_CY mm out from the main wall (video: the outer semicircle ~210 mm out, ~1 m radius)
-  static const double arcCy = getenv("ARC_CY") ? atof(getenv("ARC_CY")) : 210;
   double a = arcDeg * PI / 180, px = r * sin(a), py = WALL_Y - arcCy - r * cos(a);   // + arc = right of the light
   double toN = atan2(-(0 - px), N_Y - py);
   sim.p = {px, py, toN + aimErr * PI / 180};
@@ -361,6 +385,7 @@ static Result runOne(double arcDeg, double r, double aimErr, bool green, bool ve
   res.good = res.ok && res.left == res.wantLeft && fabs(res.ex) < 30 && fabs(res.ey) < 30 && fabs(res.epsi) < 4 && !sim.collided;
   res.t = sim.simMs / 1000.0;
   for (int k = 0; k < 5; ++k) res.st[k] = sim.stepT[k];
+  res.strafes = sim.parkStrafes; res.turns = sim.parkTurns; res.drives = sim.parkDrives;
   res.reachedN = sim.reachedStep[3];
   res.atN = sim.atStep[3];
   res.why = !res.ok ? runner.reason() : sim.collided ? "touched_wall" : res.left != res.wantLeft ? "wrong_box"
@@ -372,6 +397,18 @@ static int traceScenarios(const char* path);
 static const double ARCS[13] = {-45, -37.5, -30, -22.5, -15, -7.5, 0, 7.5, 15, 22.5, 30, 37.5, 45};
 
 int main(int argc, char** argv) {
+  if (getenv("PARAMS")) {   // NAME=value,NAME=value (tools/tune_run_logic.py)
+    char buf[2048];
+    strncpy(buf, getenv("PARAMS"), sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+    for (char* tok = strtok(buf, ","); tok; tok = strtok(0, ",")) {
+      char* eq = strchr(tok, '=');
+      if (!eq) continue;
+      *eq = 0;
+      if (!strcmp(tok, "IO_SETTLE")) { ioSettle = atof(eq + 1); continue; }   // sim-side: firmware waits scaled
+      if (!strcmp(tok, "IO_SCANS")) { ioScans = atoi(eq + 1); continue; }
+      if (!rl::setTunable(tok, float(atof(eq + 1)))) { fprintf(stderr, "unknown tunable %s\n", tok); return 2; }
+    }
+  }
   if (getenv("TRACE_OUT")) return traceScenarios(getenv("TRACE_OUT"));
   if (getenv("CALSHOW")) {   // the simulated captures next to the field's (field-2026-11-03a)
     srand(1);
@@ -383,6 +420,14 @@ int main(int argc, char** argv) {
   }
   int seeds = getenv("SEEDS") ? atoi(getenv("SEEDS")) : 4;
   int seed0 = getenv("SEED") ? atoi(getenv("SEED")) : 3848;
+  if (getenv("START")) {   // one start, traced: START="arc,r,aim" (deg, mm, deg), GREEN=1 for the green pad
+    double arc = 0, r = 1300, aim = 0;
+    sscanf(getenv("START"), "%lf,%lf,%lf", &arc, &r, &aim);
+    srand(getenv("SEED") ? atoi(getenv("SEED")) : 1);
+    Result res = runOne(arc, r, aim, getenv("GREEN") && atoi(getenv("GREEN")), true);
+    printf("start arc %+.1f r %.0f aim %+.1f | %s | box err x %+.0f y %+.0f psi %+.1f | %.1fs %s\n", arc, r, aim, res.why, res.ex, res.ey, res.epsi, res.t, res.good ? "OK" : "FAIL");
+    return 0;
+  }
   int verboseRun = argc > 1 ? atoi(argv[1]) : -1;
   int passed = 0, runs = 0, nReasons = 0, reasonCount[32];
   const char* reasons[32];
@@ -390,6 +435,7 @@ int main(int argc, char** argv) {
   int nN = 0;
   double ph[4] = {0, 0, 0, 0};
   std::vector<double> times;
+  std::vector<Result> all;
   for (int s = 0; s < seeds; ++s) {
     srand(seed0 + s);
     for (int ai = 0; ai < 13; ++ai)
@@ -397,7 +443,8 @@ int main(int argc, char** argv) {
         srand(seed0 * 7919 + s * 131 + ai * 2 + col);   // same start, robot and noise per run whatever the code does
         double r = uni(1250, 1350), aim = uni(-4, 4);
         bool v = runs == verboseRun;
-        Result res = runOne(ARCS[ai], r, aim, col == 0, v);
+        Result res = runOne(ARCS[ai] * arcMax / 45, r, aim, col == 0, v);
+        all.push_back(res);
         ++runs;
         passed += res.good;
         sumT += res.t;
@@ -410,7 +457,7 @@ int main(int argc, char** argv) {
         if (j == nReasons) { reasons[nReasons] = res.why; reasonCount[nReasons++] = 0; }
         ++reasonCount[j];
         if (getenv("LIST") || v)
-          printf("%3d arc %+5.1f %s | %-22s box err x %+5.0f y %+5.0f psi %+5.1f | at N x %+4.0f psi %+5.1f | %5.1fs %s\n", runs - 1, ARCS[ai],
+          printf("%3d arc %+5.1f %s | %-22s box err x %+5.0f y %+5.0f psi %+5.1f | at N x %+4.0f psi %+5.1f | %5.1fs %s\n", runs - 1, ARCS[ai] * arcMax / 45,
                  col == 0 ? "green" : "red  ", res.why, res.ex, res.ey, res.epsi, res.atN.x, res.atN.psi * 180 / PI, res.t, res.good ? "OK" : "FAIL");
       }
   }
@@ -421,6 +468,25 @@ int main(int argc, char** argv) {
   printf("mean run time %.1f s (max %.1f s): start to N's line %.1f, settle on N %.1f, colour + turn %.1f, to the box %.1f\n", sumT / runs, maxT,
          ph[0] / runs, ph[1] / runs, ph[2] / runs, ph[3] / runs);
   printf("%d/%d parked within 30 mm and 4 deg, no wall touched (%.1f %%)\n", passed, runs, 100.0 * passed / runs);
+  if (getenv("METRICS")) {   // one JSON line for the tuner; box errors over runs that reached the right box
+    int n = 0, touched = 0, wrong = 0, stopped = 0, inBox = 0;
+    double sx = 0, sy = 0, sp = 0, mx = 0, my = 0, mp = 0, st = 0, tmax = 0, ss = 0, sr = 0, sd = 0;
+    for (const Result& q : all) {
+      ++n;
+      touched += q.collided; stopped += !q.ok; wrong += q.ok && q.left != q.wantLeft;
+      st += q.t; tmax = q.t > tmax ? q.t : tmax; ss += q.strafes; sr += q.turns; sd += q.drives;
+      if (q.ok && q.left == q.wantLeft) {
+        ++inBox;
+        double ax = fabs(q.ex), ay = fabs(q.ey), ap = fabs(q.epsi);
+        sx += ax; sy += ay; sp += ap;
+        mx = ax > mx ? ax : mx; my = ay > my ? ay : my; mp = ap > mp ? ap : mp;
+      }
+    }
+    int b = inBox ? inBox : 1;
+    printf("METRICS {\"n\":%d,\"success\":%.5f,\"touched\":%.5f,\"wrong_box\":%.5f,\"stopped\":%.5f,\"err_deep\":%.2f,\"err_along\":%.2f,\"err_heading\":%.3f,"
+           "\"worst_deep\":%.1f,\"worst_along\":%.1f,\"worst_heading\":%.2f,\"time\":%.2f,\"time_max\":%.1f,\"park_strafes\":%.3f,\"park_turns\":%.3f,\"park_drives\":%.3f}\n",
+           n, double(passed) / n, double(touched) / n, double(wrong) / n, double(stopped) / n, sx / b, sy / b, sp / b, mx, my, mp, st / n, tmax, ss / n, sr / n, sd / n);
+  }
   return 0;
 }
 
@@ -438,17 +504,17 @@ static int traceScenarios(const char* path) {
       tracing = true;
       tPoses.clear();
       tEvents.clear();
-      Result res = runOne(ARCS[ai], r, aim, col == 0, false);
+      Result res = runOne(ARCS[ai] * arcMax / 45, r, aim, col == 0, false);
       tracing = false;
       fprintf(f, "%s{\"label\":\"arc %+.1f deg, %s\",\"colour\":\"%s\",\"ok\":%s,\"good\":%s,\"reason\":\"%s\",\"collided\":%s,\"err\":[%.0f,%.0f,%.1f],\"poses\":[",
-              run ? "," : "", ARCS[ai], col == 0 ? "green" : "red", col == 0 ? "green" : "red", res.ok ? "true" : "false", res.good ? "true" : "false",
+              run ? "," : "", ARCS[ai] * arcMax / 45, col == 0 ? "green" : "red", col == 0 ? "green" : "red", res.ok ? "true" : "false", res.good ? "true" : "false",
               res.why, res.collided ? "true" : "false", res.ex, res.ey, res.epsi);
       for (size_t i = 0; i < tPoses.size(); ++i) fprintf(f, "%s[%.2f,%.0f,%.0f,%.3f]", i ? "," : "", tPoses[i].t, tPoses[i].x, tPoses[i].y, tPoses[i].psi);
       fprintf(f, "],\"events\":[");
       for (size_t i = 0; i < tEvents.size(); ++i)
         fprintf(f, "%s[%.2f,\"%s\",%d,%d,%d,%d]", i ? "," : "", tEvents[i].t, tEvents[i].name.c_str(), tEvents[i].a, tEvents[i].b, tEvents[i].c, tEvents[i].d);
       fprintf(f, "]}");
-      fprintf(stderr, "run %2d arc %+5.1f %-5s %-22s %5.1fs\n", run, ARCS[ai], col == 0 ? "green" : "red", res.why, res.t);
+      fprintf(stderr, "run %2d arc %+5.1f %-5s %-22s %5.1fs\n", run, ARCS[ai] * arcMax / 45, col == 0 ? "green" : "red", res.why, res.t);
     }
   fprintf(f, "]}\n");
   fclose(f);

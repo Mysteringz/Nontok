@@ -30,6 +30,7 @@ MOTION = re.compile(r"SPIN [1-4] [+-]|(MOT|TURNTEST)( -?\d{1,3}){4}"
                     r"|WMAP( [1-4] -?1){4}|REF( \d{1,4}){5}|GO( [01]){3}( \d{1,3}){2}|TURN -?\d{1,3}( \d{1,3}){2}"
                     r"|PULSE( -?\d{1,3}){3} \d{1,3} \d{1,4}"  # timed move for the stop-and-go controller
                     r"|CAL [0-5]( \d{1,4}){5}|CALRG \d{1,4} \d{1,4}|RUN [1-4] [1-4]( -?1| 0)?|CREEP \d{2,3}"  # run calibration, run
+                    r"|STEPPER (-?\d{1,3}|TO -?\d{1,3}|HOLD [01]|ZERO)"  # stepper: relative / absolute move in degrees, lock, set zero
                     r"|BTATN? AT[A-Z0-9+=]{0,20}")  # Bluetooth module AT command (USB only; answers only while unpaired)
 PAGE = ROOT / "tools" / "probe_dashboard.html"
 # Competition calibration: 5 s of stationary readings per pose, appended one capture per line.
@@ -111,7 +112,7 @@ def fast_sample(text, full):
     gyro = dict((full or {}).get("gyro") or {})
     gyro["angle_deg"] = (list(gyro.get("angle_deg") or [None, None]))[:2] + [yaw]
     gyro["rate_dps"] = (list(gyro.get("rate_dps") or [None, None]))[:2] + [rate]
-    record = {k: v for k, v in (full or {}).items() if k in ("boot", "turntest", "step")}
+    record = {k: v for k, v in (full or {}).items() if k in ("boot", "turntest", "step", "chk", "stepper")}
     record.update({"type": "sample", "link": "bt", "fast": 1, "ms": ms, "adc": adc,
                    "ultrasonic_mm": us, "gyro": gyro, "color_rgbc": rgbc, "start_btn": button})
     return record
